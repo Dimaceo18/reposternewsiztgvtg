@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: telegram-news-reposter
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: SOURCE_CHANNEL_ID
+        sync: false
+      - key: TARGET_CHANNEL_ID
+        sync: false
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: FONT_PATH
+        value: /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf
+    healthCheckPath: /health
