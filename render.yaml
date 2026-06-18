@@ -1,8 +1,8 @@
 services:
-  - type: web
+  - type: web  # Меняем с worker на web
     name: telegram-news-reposter
     env: docker
-    plan: free
+    plan: free  # Бесплатный план доступен для web
     dockerfilePath: ./Dockerfile
     envVars:
       - key: BOT_TOKEN
