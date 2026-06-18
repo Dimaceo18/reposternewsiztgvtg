@@ -820,4 +820,247 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).fetchall()
         
         last_post = conn.execute(
-            "SELECT republished_at FROM rep
+            "SELECT republished_at FROM republished_posts WHERE channel_id = ? ORDER BY republished_at DESC LIMIT 1",
+            (SOURCE_CHANNEL_ID,)
+        ).fetchone()
+    
+    status_text = (
+        f"📊 *Статус бота*\n\n"
+        f"📥 Канал-источник: `{SOURCE_CHANNEL_ID}`\n"
+        f"📤 Целевой канал: `{TARGET_CHANNEL_ID}`\n"
+        f"🤖 DeepSeek AI: {'✅ Активен' if deepseek_client else '❌ Не настроен'}\n"
+        f"🎨 Оформление фото: ✅ Включено\n"
+        f"🎬 Видео: Без оформления\n"
+        f"📸 Медиа-группы: Первое фото с заголовком\n"
+        f"📝 Всего републиковано: {republished_count}\n"
+        f"❌ Ошибок: {failed_count}\n"
+    )
+    
+    if media_stats:
+        status_text += f"\n*📊 По типам:*\n"
+        for media_type, count in media_stats:
+            if media_type == "photo":
+                icon = "📸"
+            elif media_type == "video":
+                icon = "🎬"
+            elif media_type == "document_image":
+                icon = "📄"
+            elif media_type == "photo_group":
+                icon = "🖼️"
+            elif media_type == "video_photo_mixed":
+                icon = "🎬📸"
+            else:
+                icon = "📝"
+            status_text += f"  {icon} {media_type or 'текст'}: {count}\n"
+    
+    status_text += f"\n🕐 Последняя публикация: {last_post[0] if last_post else 'Нет'}\n"
+    status_text += f"⏰ Текущее время: {datetime.now().strftime('%H:%M:%S')}"
+    
+    await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает статистику"""
+    with sqlite3.connect(DB_PATH) as conn:
+        daily_stats = conn.execute(
+            """SELECT DATE(republished_at), COUNT(*) 
+               FROM republished_posts 
+               WHERE channel_id = ? 
+               GROUP BY DATE(republished_at)
+               ORDER BY DATE(republished_at) DESC 
+               LIMIT 7""",
+            (SOURCE_CHANNEL_ID,)
+        ).fetchall()
+        
+        media_stats = conn.execute(
+            """SELECT media_type, COUNT(*) 
+               FROM republished_posts 
+               WHERE channel_id = ? 
+               GROUP BY media_type""",
+            (SOURCE_CHANNEL_ID,)
+        ).fetchall()
+        
+        last_posts = conn.execute(
+            """SELECT title, republished_at, media_type 
+               FROM republished_posts 
+               WHERE channel_id = ? 
+               ORDER BY republished_at DESC 
+               LIMIT 5""",
+            (SOURCE_CHANNEL_ID,)
+        ).fetchall()
+    
+    stats_text = "📊 *Статистика публикаций*\n\n"
+    
+    if daily_stats:
+        stats_text += "*📅 Последние 7 дней:*\n"
+        for date, count in daily_stats:
+            stats_text += f"  • {date}: {count} постов\n"
+    else:
+        stats_text += "📭 Нет публикаций за последние 7 дней\n"
+    
+    if media_stats:
+        stats_text += f"\n*📊 По типам контента:*\n"
+        for media_type, count in media_stats:
+            if media_type == "photo":
+                icon = "📸 Фото (оформленное)"
+            elif media_type == "video":
+                icon = "🎬 Видео"
+            elif media_type == "document_image":
+                icon = "📄 Документ-изображение"
+            elif media_type == "photo_group":
+                icon = "🖼️ Группа фото"
+            elif media_type == "video_photo_mixed":
+                icon = "🎬📸 Видео + Фото"
+            else:
+                icon = "📝 Текст"
+            stats_text += f"  • {icon}: {count}\n"
+    
+    if last_posts:
+        stats_text += f"\n*🕐 Последние 5 публикаций:*\n"
+        for title, date, media_type in last_posts:
+            if media_type == "photo":
+                icon = "📸"
+            elif media_type == "video":
+                icon = "🎬"
+            elif media_type == "document_image":
+                icon = "📄"
+            elif media_type == "photo_group":
+                icon = "🖼️"
+            elif media_type == "video_photo_mixed":
+                icon = "🎬📸"
+            else:
+                icon = "📝"
+            stats_text += f"  • {icon} {title[:40]}... ({date.strftime('%d.%m %H:%M')})\n"
+    
+    await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
+
+async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Очищает историю"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute(
+            "DELETE FROM republished_posts WHERE channel_id = ?",
+            (SOURCE_CHANNEL_ID,)
+        )
+        conn.execute(
+            "DELETE FROM failed_posts WHERE channel_id = ?",
+            (SOURCE_CHANNEL_ID,)
+        )
+        conn.execute(
+            "DELETE FROM processed_messages WHERE channel_id = ?",
+            (SOURCE_CHANNEL_ID,)
+        )
+    await update.message.reply_text("✅ История очищена!")
+
+# ==================== FASTAPI ДЛЯ HEALTH CHECK ====================
+fastapi_app = FastAPI()
+
+@fastapi_app.get("/")
+@fastapi_app.get("/health")
+async def health():
+    return {"status": "ok", "mode": "webhook"}
+
+@fastapi_app.post(f"/{BOT_TOKEN}")
+async def webhook(request: dict):
+    """Webhook endpoint для Telegram"""
+    try:
+        update = Update.de_json(request, None)
+        await application.process_update(update)
+        return {"ok": True}
+    except Exception as e:
+        print(f"❌ Ошибка webhook: {e}")
+        return {"ok": False, "error": str(e)}
+
+# ==================== ЗАПУСК ====================
+async def run_bot():
+    """Запуск бота с Webhook для Render"""
+    global application
+    
+    init_db()
+    
+    print("\n" + "="*50)
+    print("🤖 БОТ-РЕПОСТЕР НОВОСТЕЙ (WEBHOOK MODE)")
+    print("="*50)
+    print(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
+    print(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
+    print(f"🤖 DeepSeek AI: {'✅ Подключен' if deepseek_client else '❌ Не настроен'}")
+    print("="*50 + "\n")
+    
+    # Создаем приложение
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Команды
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("status", status))
+    application.add_handler(CommandHandler("stats", stats))
+    application.add_handler(CommandHandler("clear", clear_history))
+    
+    # Обработчик новых постов в канале
+    application.add_handler(MessageHandler(
+        filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
+        handle_new_channel_post
+    ))
+    
+    # Запускаем бота
+    await application.initialize()
+    await application.start()
+    
+    # Получаем порт
+    port = int(os.getenv("PORT", 10000))
+    
+    # Получаем URL для webhook
+    external_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME")
+    if external_hostname:
+        webhook_url = f"https://{external_hostname}/{BOT_TOKEN}"
+    else:
+        # Для локальной разработки или если RENDER_EXTERNAL_HOSTNAME не задан
+        webhook_url = f"https://localhost:{port}/{BOT_TOKEN}"
+        print("⚠️ RENDER_EXTERNAL_HOSTNAME не задан, использую localhost")
+    
+    print(f"🔗 Webhook URL: {webhook_url}")
+    
+    # Удаляем старый webhook
+    try:
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Старый webhook удален")
+    except Exception as e:
+        print(f"⚠️ Ошибка удаления webhook: {e}")
+    
+    # Ждем перед установкой нового webhook
+    await asyncio.sleep(2)
+    
+    # Устанавливаем webhook
+    try:
+        await application.bot.set_webhook(
+            url=webhook_url,
+            drop_pending_updates=True,
+            allowed_updates=["message", "channel_post", "callback_query"]
+        )
+        print("✅ Webhook установлен успешно")
+    except Exception as e:
+        print(f"❌ Ошибка установки webhook: {e}")
+        raise
+    
+    print(f"✅ Бот готов к работе на порту {port}!")
+    print("⚡ Ожидание новых постов в канале-источнике...")
+    
+    # Запускаем FastAPI для health check
+    config = uvicorn.Config(fastapi_app, host="0.0.0.0", port=port, log_level="info")
+    server = uvicorn.Server(config)
+    await server.serve()
+
+if __name__ == "__main__":
+    if not BOT_TOKEN:
+        print("❌ Ошибка: BOT_TOKEN не задан!")
+        exit(1)
+    
+    if not SOURCE_CHANNEL_ID:
+        print("❌ Ошибка: SOURCE_CHANNEL_ID не задан!")
+        exit(1)
+    
+    if not TARGET_CHANNEL_ID:
+        print("❌ Ошибка: TARGET_CHANNEL_ID не задан!")
+        exit(1)
+    
+    if not DEEPSEEK_API_KEY:
+        print("⚠️ Предупреждение: DEEPSEEK_API_KEY не задан! Будет работать без AI.")
+    
+    asyncio.run(run_bot())
