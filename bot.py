@@ -4,13 +4,12 @@ import os
 import re
 import io
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMediaPhoto, InputMediaVideo
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram.constants import ParseMode
-import httpx
 from openai import AsyncOpenAI
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 
@@ -50,7 +49,6 @@ deepseek_client = AsyncOpenAI(
 
 # ==================== БАЗА ДАННЫХ ====================
 def init_db():
-    """Инициализация базы данных"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS republished_posts (
@@ -84,7 +82,6 @@ def init_db():
     print("✅ База данных готова")
 
 def is_message_processed(message_id: int, channel_id: str) -> bool:
-    """Проверяет, обработано ли сообщение"""
     with sqlite3.connect(DB_PATH) as conn:
         result = conn.execute(
             "SELECT 1 FROM processed_messages WHERE message_id = ? AND channel_id = ?",
@@ -93,7 +90,6 @@ def is_message_processed(message_id: int, channel_id: str) -> bool:
         return result is not None
 
 def save_processed_message(message_id: int, channel_id: str):
-    """Сохраняет ID обработанного сообщения"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO processed_messages (message_id, channel_id, processed_at) VALUES (?, ?, ?)",
@@ -101,7 +97,6 @@ def save_processed_message(message_id: int, channel_id: str):
         )
 
 def save_republished(message_id: int, channel_id: str, title: str, original_text: str, adapted_text: str, has_media: bool = False, media_type: str = None):
-    """Сохраняет информацию о републикации"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             """INSERT OR REPLACE INTO republished_posts 
@@ -111,16 +106,22 @@ def save_republished(message_id: int, channel_id: str, title: str, original_text
         )
 
 def save_failed(message_id: int, channel_id: str, error: str):
-    """Сохраняет информацию об ошибке"""
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
             "INSERT INTO failed_posts (message_id, channel_id, error, failed_at) VALUES (?, ?, ?, ?)",
             (message_id, channel_id, error, datetime.now())
         )
 
+def get_last_processed_message(channel_id: str) -> Optional[int]:
+    with sqlite3.connect(DB_PATH) as conn:
+        result = conn.execute(
+            "SELECT MAX(message_id) FROM republished_posts WHERE channel_id = ?",
+            (channel_id,)
+        ).fetchone()
+        return result[0] if result and result[0] else None
+
 # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С ТЕКСТОМ ====================
 def remove_emojis(text: str) -> str:
-    """Удаляет эмодзи из текста"""
     if not text:
         return ""
     emoji_pattern = re.compile(
@@ -139,7 +140,6 @@ def remove_emojis(text: str) -> str:
     return emoji_pattern.sub(r'', text)
 
 def format_caption(title: str, body: str) -> str:
-    """Форматирует подпись для поста"""
     title = remove_emojis(title) if title else ""
     body = remove_emojis(body) if body else ""
     
@@ -152,7 +152,6 @@ def format_caption(title: str, body: str) -> str:
     return f"<b>{title}</b>\n\n{body}"
 
 def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[str]:
-    """Переносит текст на несколько строк"""
     words = text.split()
     lines = []
     current_line = []
@@ -178,7 +177,6 @@ def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[
     return lines
 
 def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
-    """Оформляет фото с текстом"""
     if not photo_bytes or len(photo_bytes) == 0:
         raise ValueError("Фото пустое")
     
@@ -186,7 +184,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     img = Image.open(io.BytesIO(photo_bytes)).convert("RGB")
     w, h = img.size
     
-    # Обрезаем до соотношения 4:5
     target_ratio = 4 / 5
     cur_ratio = w / h
     if cur_ratio > target_ratio:
@@ -198,10 +195,8 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
         top = (h - new_h) // 2
         img = img.crop((0, top, w, top + new_h))
     
-    # Изменяем размер
     img = img.resize((1080, 1350), Image.Resampling.LANCZOS)
     
-    # Затемняем нижнюю часть
     img = ImageEnhance.Brightness(img).enhance(0.85)
     w, h = img.size
     gh = int(h * 0.48)
@@ -220,7 +215,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
     
     draw = ImageDraw.Draw(img)
     
-    # Загружаем шрифт
     font = None
     font_size = 68
     
@@ -270,7 +264,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
             line_width = bbox[2] - bbox[0]
         x = (img.width - line_width) // 2
         
-        # Тень для текста
         offsets = [(-2, -2), (-2, 2), (2, -2), (2, 2), (0, -2), (0, 2), (-2, 0), (2, 0)]
         for dx, dy in offsets:
             draw.text((x + dx, y + dy), line, font=font, fill=(0, 0, 0, 255))
@@ -295,7 +288,6 @@ def process_photo(photo_bytes: bytes, title_text: str) -> io.BytesIO:
 
 # ==================== ФУНКЦИИ ДЛЯ РАБОТЫ С AI ====================
 async def call_deepseek_with_retry(prompt: str, text: str, max_attempts: int = 2) -> str:
-    """Вызов DeepSeek API с повторными попытками"""
     if not deepseek_client:
         return text
     
@@ -344,13 +336,11 @@ async def call_deepseek_with_retry(prompt: str, text: str, max_attempts: int = 2
     return ""
 
 def parse_ai_response(content: str) -> Tuple[str, str]:
-    """Разбирает ответ AI на заголовок и текст"""
     if not content:
         return "", ""
     
     content = content.strip()
     
-    # Убираем лишние маркеры
     lines = content.split('\n')
     clean_lines = []
     for line in lines:
@@ -361,7 +351,6 @@ def parse_ai_response(content: str) -> Tuple[str, str]:
     
     content = '\n'.join(clean_lines).strip()
     
-    # Пытаемся разделить на заголовок и текст
     parts = content.split('\n\n', 1)
     if len(parts) == 2:
         title = parts[0].strip()
@@ -383,7 +372,6 @@ def parse_ai_response(content: str) -> Tuple[str, str]:
                 else:
                     body = content
     
-    # Очищаем от лишних символов
     title = re.sub(r'^[#*\-_\s]+', '', title).strip()
     body = re.sub(r'^[#*\-_\s]+', '', body).strip()
     
@@ -397,234 +385,57 @@ def parse_ai_response(content: str) -> Tuple[str, str]:
     
     return title, body
 
-# ==================== КНОПКИ ДЛЯ ПОСТОВ ====================
 def get_post_publish_keyboard():
-    """Клавиатура для опубликованных постов"""
     keyboard = [
         [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{TARGET_CHANNEL_ID.replace('-100', '')}")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# ==================== ХРАНИЛИЩЕ ДЛЯ МЕДИА-ГРУПП ====================
-media_group_cache = {}
-
-# ==================== ОБРАБОТКА МЕДИА-ГРУПП ====================
-async def process_media_group(bot: Bot, message, target_channel_id: str, caption: str, title: str, source_channel_id: str, message_id: int):
-    """Обрабатывает медиа-группу (несколько фото/видео)"""
-    try:
-        print(f"📦 Обработка медиа-группы, первое сообщение: {message_id}")
-        
-        # Собираем все медиа из группы
-        media_group = []
-        has_video = False
-        has_photo = False
-        photo_count = 0
-        
-        # Проверяем, есть ли видео в группе
-        if message.video:
-            has_video = True
-            print(f"🎬 В группе есть видео")
-            
-            # Скачиваем видео
-            video_file = await bot.get_file(message.video.file_id)
-            video_bytes = await video_file.download_as_bytearray()
-            
-            media_group.append({
-                'type': 'video',
-                'file_id': message.video.file_id,
-                'bytes': video_bytes,
-                'caption': None
-            })
-            
-        elif message.photo:
-            has_photo = True
-            photo_count += 1
-            print(f"📸 В группе есть фото #{photo_count}")
-            
-            # Скачиваем фото
-            photo = message.photo[-1]
-            photo_file = await bot.get_file(photo.file_id)
-            photo_bytes = await photo_file.download_as_bytearray()
-            
-            # Определяем, нужно ли оформлять (только первое фото, если нет видео)
-            should_design = (photo_count == 1 and not has_video)
-            
-            if should_design:
-                print(f"🎨 Оформляем первое фото с заголовком")
-                try:
-                    processed_photo = process_photo(photo_bytes, title)
-                    processed_bytes = processed_photo.getvalue()
-                    media_group.append({
-                        'type': 'photo',
-                        'bytes': processed_bytes,
-                        'caption': caption,
-                        'is_designed': True
-                    })
-                except Exception as e:
-                    print(f"⚠️ Ошибка оформления первого фото: {e}")
-                    media_group.append({
-                        'type': 'photo',
-                        'bytes': photo_bytes,
-                        'caption': caption,
-                        'is_designed': False
-                    })
-            else:
-                # Остальные фото или если есть видео - без оформления
-                media_group.append({
-                    'type': 'photo',
-                    'bytes': photo_bytes,
-                    'caption': None,
-                    'is_designed': False
-                })
-        
-        # Отправляем медиа-группу
-        if media_group:
-            # Если в группе есть видео - отправляем отдельно
-            if has_video:
-                print(f"🎬 Отправляем видео из медиа-группы")
-                # Отправляем видео с подписью
-                for item in media_group:
-                    if item['type'] == 'video':
-                        await bot.send_video(
-                            chat_id=target_channel_id,
-                            video=InputFile(io.BytesIO(item['bytes']), filename="video.mp4"),
-                            caption=caption,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=get_post_publish_keyboard()
-                        )
-                    elif item['type'] == 'photo':
-                        # Отправляем фото без подписи (подпись уже была с видео)
-                        await bot.send_photo(
-                            chat_id=target_channel_id,
-                            photo=InputFile(io.BytesIO(item['bytes']), filename="photo.jpg")
-                        )
-            else:
-                # Только фото - отправляем как медиа-группу
-                print(f"📸 Отправляем {len(media_group)} фото как медиа-группу")
-                
-                # Создаем медиа-группу для отправки
-                media_to_send = []
-                for i, item in enumerate(media_group):
-                    if item['type'] == 'photo':
-                        if i == 0 and item.get('caption'):  # Первое фото с подписью
-                            media_to_send.append(
-                                InputMediaPhoto(
-                                    media=io.BytesIO(item['bytes']),
-                                    caption=item['caption'],
-                                    parse_mode=ParseMode.HTML
-                                )
-                            )
-                        else:  # Остальные без подписи
-                            media_to_send.append(
-                                InputMediaPhoto(
-                                    media=io.BytesIO(item['bytes'])
-                                )
-                            )
-                
-                # Отправляем медиа-группу
-                if media_to_send:
-                    await bot.send_media_group(
-                        chat_id=target_channel_id,
-                        media=media_to_send
-                    )
-                    
-                    # Добавляем кнопку подписки после медиа-группы
-                    await bot.send_message(
-                        chat_id=target_channel_id,
-                        text="📢 Подпишитесь на канал, чтобы не пропустить новости!",
-                        reply_markup=get_post_publish_keyboard()
-                    )
-        
-        # Сохраняем в БД
-        media_type = "video_photo_mixed" if has_video and has_photo else ("video" if has_video else "photo_group")
-        has_media = True
-        
-        save_republished(message_id, source_channel_id, title, message.text or message.caption or "", 
-                        message.text or message.caption or "", has_media, media_type)
-        save_processed_message(message_id, source_channel_id)
-        
-        print(f"✅ Медиа-группа успешно обработана и сохранена")
-        
-    except Exception as e:
-        print(f"❌ Ошибка при обработке медиа-группы: {e}")
-        save_failed(message_id, source_channel_id, str(e))
-        save_processed_message(message_id, source_channel_id)
-
-# ==================== ОСНОВНАЯ ЛОГИКА ОБРАБОТКИ ====================
-async def process_and_republish(bot: Bot, message, source_channel_id: str, target_channel_id: str):
-    """Обрабатывает и републикует сообщение"""
+# ==================== ОБРАБОТКА СООБЩЕНИЙ ====================
+async def process_message(bot: Bot, message, source_channel_id: str, target_channel_id: str):
+    """Обрабатывает одно сообщение"""
     message_id = message.message_id
     
-    # Проверяем, не обработано ли уже сообщение
+    # Проверяем, не обработано ли уже
     if is_message_processed(message_id, source_channel_id):
-        print(f"⏭️ Пропускаем сообщение {message_id} - уже обработано")
         return
     
     try:
-        # Получаем текст сообщения
+        # Получаем текст
         text = message.text or message.caption or ""
         if not text:
-            print(f"⏭️ Пропускаем сообщение {message_id} - нет текста")
             save_processed_message(message_id, source_channel_id)
             return
         
         print(f"📝 Обрабатываем сообщение {message_id}")
         print(f"📄 Длина текста: {len(text)} символов")
         
-        # Обрабатываем через DeepSeek
+        # Адаптируем текст через AI
         if deepseek_client:
-            print("🤖 Отправляем запрос к DeepSeek...")
             adapted_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
-            
             if adapted_text and len(adapted_text.strip()) > 50:
                 title, body = parse_ai_response(adapted_text)
                 print(f"✅ Текст адаптирован через AI")
-                print(f"📊 Длина адаптированного текста: {len(adapted_text)} символов")
             else:
-                print("⚠️ AI не смог обработать текст, используем оригинал")
                 title = text[:70].strip()
                 body = text[70:] if len(text) > 70 else text
                 adapted_text = text
         else:
-            print("⚠️ DeepSeek не настроен, используем оригинальный текст")
             title = text[:70].strip()
             body = text[70:] if len(text) > 70 else text
             adapted_text = text
         
-        # Формируем подпись
         caption = format_caption(title, body)
         has_media = False
         media_type = None
         
-        # ============================================================
-        # 1. ПРОВЕРЯЕМ: ЕСЛИ ЕСТЬ МЕДИА-ГРУППА (НЕСКОЛЬКО ФОТО/ВИДЕО)
-        # ============================================================
-        if message.media_group_id:
-            print(f"📦 Обнаружена медиа-группа: {message.media_group_id}")
-            await process_media_group(
-                bot, 
-                message, 
-                target_channel_id, 
-                caption, 
-                title, 
-                source_channel_id, 
-                message_id
-            )
-            return
-        
-        # ============================================================
-        # 2. ОДИНОЧНЫЕ МЕДИА
-        # ============================================================
-        
         # Проверяем наличие медиа
         if message.photo:
-            # ========== ОДНО ФОТО ==========
-            print("📸 Обнаружено одно фото, оформляем...")
+            print("📸 Обрабатываем фото...")
             photo = message.photo[-1]
             file = await bot.get_file(photo.file_id)
             photo_bytes = await file.download_as_bytearray()
             
-            # Оформляем фото с заголовком
             try:
                 processed_photo = process_photo(photo_bytes, title)
                 await bot.send_photo(
@@ -636,27 +447,20 @@ async def process_and_republish(bot: Bot, message, source_channel_id: str, targe
                 )
                 has_media = True
                 media_type = "photo"
-                print(f"📸 Опубликовано оформленное фото из сообщения {message_id}")
+                print(f"✅ Опубликовано оформленное фото")
             except Exception as e:
-                print(f"⚠️ Ошибка оформления фото: {e}, отправляем без оформления")
+                print(f"⚠️ Ошибка оформления: {e}")
                 await bot.send_photo(
                     chat_id=target_channel_id,
                     photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                     caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_post_publish_keyboard()
+                    parse_mode=ParseMode.HTML
                 )
                 has_media = True
                 media_type = "photo"
-            
-            # Сохраняем в БД
-            save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type)
-            save_processed_message(message_id, source_channel_id)
-            return
-            
+        
         elif message.video:
-            # ========== ВИДЕО (БЕЗ ОФОРМЛЕНИЯ) ==========
-            print("🎬 Обнаружено видео, отправляем с адаптированным текстом...")
+            print("🎬 Обрабатываем видео...")
             video = message.video
             file = await bot.get_file(video.file_id)
             video_bytes = await file.download_as_bytearray()
@@ -670,18 +474,12 @@ async def process_and_republish(bot: Bot, message, source_channel_id: str, targe
             )
             has_media = True
             media_type = "video"
-            print(f"🎬 Опубликовано видео из сообщения {message_id}")
-            
-            # Сохраняем в БД
-            save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type)
-            save_processed_message(message_id, source_channel_id)
-            return
-            
+            print(f"✅ Опубликовано видео")
+        
         elif message.document:
-            # ========== ДОКУМЕНТЫ ==========
             doc = message.document
             if doc.mime_type and doc.mime_type.startswith('image/'):
-                print("📄 Обнаружен документ-изображение, оформляем...")
+                print("📄 Обрабатываем документ...")
                 file = await bot.get_file(doc.file_id)
                 file_bytes = await file.download_as_bytearray()
                 
@@ -691,8 +489,7 @@ async def process_and_republish(bot: Bot, message, source_channel_id: str, targe
                         chat_id=target_channel_id,
                         photo=InputFile(processed_photo, filename=doc.file_name or "document.jpg"),
                         caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=get_post_publish_keyboard()
+                        parse_mode=ParseMode.HTML
                     )
                     has_media = True
                     media_type = "document_image"
@@ -701,221 +498,113 @@ async def process_and_republish(bot: Bot, message, source_channel_id: str, targe
                         chat_id=target_channel_id,
                         photo=InputFile(io.BytesIO(file_bytes), filename=doc.file_name or "document.jpg"),
                         caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=get_post_publish_keyboard()
+                        parse_mode=ParseMode.HTML
                     )
                     has_media = True
                     media_type = "document_image"
             else:
-                # Просто текст
                 await bot.send_message(
                     chat_id=target_channel_id,
                     text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=get_post_publish_keyboard()
+                    parse_mode=ParseMode.HTML
                 )
-            
-            # Сохраняем в БД
-            save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type)
-            save_processed_message(message_id, source_channel_id)
-            return
+        
         else:
-            # ========== ТОЛЬКО ТЕКСТ ==========
+            print("📝 Только текст...")
             await bot.send_message(
                 chat_id=target_channel_id,
                 text=caption,
                 parse_mode=ParseMode.HTML,
                 reply_markup=get_post_publish_keyboard()
             )
-            print(f"📝 Опубликован текст из сообщения {message_id}")
-            
-            # Сохраняем в БД
-            save_republished(message_id, source_channel_id, title, text, adapted_text, False, None)
-            save_processed_message(message_id, source_channel_id)
-            return
+        
+        # Сохраняем в БД
+        save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type)
+        save_processed_message(message_id, source_channel_id)
+        print(f"✅ Сообщение {message_id} обработано")
         
     except Exception as e:
-        print(f"❌ Ошибка при обработке сообщения {message_id}: {e}")
+        print(f"❌ Ошибка: {e}")
         save_failed(message_id, source_channel_id, str(e))
         save_processed_message(message_id, source_channel_id)
 
-# ==================== ОБРАБОТЧИКИ СООБЩЕНИЙ ====================
-async def handle_new_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает новые посты в канале-источнике"""
-    # Проверяем, что сообщение из канала-источника
-    if str(update.channel_post.chat_id) != SOURCE_CHANNEL_ID:
-        return
-    
-    message = update.channel_post
-    
-    # Если это медиа-группа - обрабатываем через специальный обработчик
-    if message.media_group_id:
-        await handle_media_group_message(update, context)
-        return
-    
-    # Запускаем обработку в фоновом режиме
-    asyncio.create_task(
-        process_and_republish(
-            context.bot,
-            message,
-            SOURCE_CHANNEL_ID,
-            TARGET_CHANNEL_ID
-        )
-    )
-
-async def handle_media_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обрабатывает сообщения из медиа-группы"""
-    message = update.channel_post
-    media_group_id = message.media_group_id
-    
-    if not media_group_id:
-        return
-    
-    # Сохраняем сообщение в кэш
-    if media_group_id not in media_group_cache:
-        media_group_cache[media_group_id] = {
-            'messages': [],
-            'processed': False,
-            'created_at': datetime.now()
-        }
-    
-    media_group_cache[media_group_id]['messages'].append(message)
-    
-    # Ждем немного, чтобы собрать все сообщения группы
-    await asyncio.sleep(1)
-    
-    # Проверяем, не обработана ли уже группа
-    if media_group_cache[media_group_id]['processed']:
-        return
-    
-    # Проверяем, собраны ли все сообщения (по таймауту)
-    if (datetime.now() - media_group_cache[media_group_id]['created_at']).seconds > 2:
-        media_group_cache[media_group_id]['processed'] = True
+# ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
+async def check_and_process(bot: Bot):
+    """Проверяет новые посты в канале"""
+    try:
+        # Получаем последние 10 сообщений из канала
+        last_id = get_last_processed_message(SOURCE_CHANNEL_ID)
         
-        # Берем первое сообщение для обработки
-        first_message = media_group_cache[media_group_id]['messages'][0]
-        
-        # Получаем текст
-        text = first_message.text or first_message.caption or ""
-        
-        # Обрабатываем через DeepSeek для получения заголовка
-        if deepseek_client and text:
-            adapted_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
-            if adapted_text and len(adapted_text.strip()) > 50:
-                title, body = parse_ai_response(adapted_text)
-            else:
-                title = text[:70].strip()
-        else:
-            title = text[:70].strip() if text else "Новость"
-        
-        # Формируем подпись
-        caption = format_caption(title, body if 'body' in locals() else text)
-        
-        # Обрабатываем медиа-группу
-        await process_media_group(
-            context.bot,
-            first_message,
-            TARGET_CHANNEL_ID,
-            caption,
-            title,
-            SOURCE_CHANNEL_ID,
-            first_message.message_id
-        )
-        
-        # Очищаем кэш
-        del media_group_cache[media_group_id]
+        try:
+            # Пробуем получить историю
+            async for message in bot.get_chat_history(
+                chat_id=SOURCE_CHANNEL_ID,
+                limit=10
+            ):
+                # Пропускаем уже обработанные
+                if last_id and message.message_id <= last_id:
+                    continue
+                
+                # Пропускаем служебные сообщения
+                if message.text and message.text.startswith('/'):
+                    continue
+                
+                # Обрабатываем сообщение
+                await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
+                
+                # Небольшая задержка
+                await asyncio.sleep(0.5)
+                
+        except Exception as e:
+            print(f"⚠️ Ошибка получения истории: {e}")
+            
+    except Exception as e:
+        print(f"❌ Ошибка проверки: {e}")
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработчик команды /start"""
     await update.message.reply_text(
         "🤖 *Бот-репостер новостей*\n\n"
         "Я автоматически забираю посты из одного канала, адаптирую их через ИИ и публикую в другом.\n\n"
         f"📥 *Источник:* {SOURCE_CHANNEL_ID}\n"
         f"📤 *Целевой канал:* {TARGET_CHANNEL_ID}\n"
-        f"🤖 *DeepSeek AI:* {'✅ Подключен' if deepseek_client else '❌ Не настроен'}\n"
-        f"🎨 *Оформление фото:* ✅ Активно\n"
-        f"🎬 *Видео:* Адаптация текста, без оформления\n"
-        f"📸 *Медиа-группы:* Первое фото оформляется, остальные без изменений\n\n"
-        "⚡ Реагирую на новые посты в реальном времени\n"
-        "🔄 Автоматическая адаптация текста\n"
-        "🎨 Оформление фото с заголовком\n"
-        "📊 Сохранение истории публикаций\n\n"
-        "*Команды:*\n"
-        "/start - Показать это сообщение\n"
-        "/status - Статус бота\n"
-        "/stats - Статистика\n"
-        "/clear - Очистить историю",
+        f"🤖 *DeepSeek AI:* {'✅ Подключен' if deepseek_client else '❌ Не настроен'}\n\n"
+        "Команды:\n"
+        "/start - Это сообщение\n"
+        "/status - Статус\n"
+        "/stats - Статистика",
         parse_mode=ParseMode.MARKDOWN
     )
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает статус бота"""
     with sqlite3.connect(DB_PATH) as conn:
-        republished_count = conn.execute(
+        count = conn.execute(
             "SELECT COUNT(*) FROM republished_posts WHERE channel_id = ?",
             (SOURCE_CHANNEL_ID,)
         ).fetchone()[0]
         
-        failed_count = conn.execute(
+        failed = conn.execute(
             "SELECT COUNT(*) FROM failed_posts WHERE channel_id = ?",
             (SOURCE_CHANNEL_ID,)
         ).fetchone()[0]
         
-        # Статистика по типам
-        media_stats = conn.execute(
-            """SELECT media_type, COUNT(*) 
-               FROM republished_posts 
-               WHERE channel_id = ? 
-               GROUP BY media_type""",
+        last = conn.execute(
+            "SELECT MAX(republished_at) FROM republished_posts WHERE channel_id = ?",
             (SOURCE_CHANNEL_ID,)
-        ).fetchall()
-        
-        last_post = conn.execute(
-            "SELECT republished_at FROM republished_posts WHERE channel_id = ? ORDER BY republished_at DESC LIMIT 1",
-            (SOURCE_CHANNEL_ID,)
-        ).fetchone()
+        ).fetchone()[0]
     
-    status_text = (
-        f"📊 *Статус бота*\n\n"
-        f"📥 Канал-источник: `{SOURCE_CHANNEL_ID}`\n"
-        f"📤 Целевой канал: `{TARGET_CHANNEL_ID}`\n"
-        f"🤖 DeepSeek AI: {'✅ Активен' if deepseek_client else '❌ Не настроен'}\n"
-        f"🎨 Оформление фото: ✅ Включено\n"
-        f"🎬 Видео: Без оформления\n"
-        f"📸 Медиа-группы: Первое фото с заголовком\n"
-        f"📝 Всего републиковано: {republished_count}\n"
-        f"❌ Ошибок: {failed_count}\n"
+    await update.message.reply_text(
+        f"📊 *Статус*\n\n"
+        f"📝 Обработано: {count}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"🕐 Последняя: {last or 'Нет'}\n"
+        f"🤖 AI: {'✅' if deepseek_client else '❌'}",
+        parse_mode=ParseMode.MARKDOWN
     )
-    
-    # Добавляем статистику по типам
-    if media_stats:
-        status_text += f"\n*📊 По типам:*\n"
-        for media_type, count in media_stats:
-            if media_type == "photo":
-                icon = "📸"
-            elif media_type == "video":
-                icon = "🎬"
-            elif media_type == "document_image":
-                icon = "📄"
-            elif media_type == "photo_group":
-                icon = "🖼️"
-            elif media_type == "video_photo_mixed":
-                icon = "🎬📸"
-            else:
-                icon = "📝"
-            status_text += f"  {icon} {media_type or 'текст'}: {count}\n"
-    
-    status_text += f"\n🕐 Последняя публикация: {last_post[0] if last_post else 'Нет'}\n"
-    status_text += f"⏰ Текущее время: {datetime.now().strftime('%H:%M:%S')}"
-    
-    await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Показывает статистику"""
     with sqlite3.connect(DB_PATH) as conn:
-        # Статистика по дням
-        daily_stats = conn.execute(
+        daily = conn.execute(
             """SELECT DATE(republished_at), COUNT(*) 
                FROM republished_posts 
                WHERE channel_id = ? 
@@ -924,172 +613,101 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
                LIMIT 7""",
             (SOURCE_CHANNEL_ID,)
         ).fetchall()
-        
-        # Статистика по типам медиа
-        media_stats = conn.execute(
-            """SELECT media_type, COUNT(*) 
-               FROM republished_posts 
-               WHERE channel_id = ? 
-               GROUP BY media_type""",
-            (SOURCE_CHANNEL_ID,)
-        ).fetchall()
-        
-        # Последние 5 публикаций
-        last_posts = conn.execute(
-            """SELECT title, republished_at, media_type 
-               FROM republished_posts 
-               WHERE channel_id = ? 
-               ORDER BY republished_at DESC 
-               LIMIT 5""",
-            (SOURCE_CHANNEL_ID,)
-        ).fetchall()
     
-    stats_text = "📊 *Статистика публикаций*\n\n"
-    
-    # Статистика по дням
-    if daily_stats:
-        stats_text += "*📅 Последние 7 дней:*\n"
-        for date, count in daily_stats:
-            stats_text += f"  • {date}: {count} постов\n"
+    text = "📊 *Статистика*\n\n"
+    if daily:
+        for date, count in daily:
+            text += f"📅 {date}: {count} постов\n"
     else:
-        stats_text += "📭 Нет публикаций за последние 7 дней\n"
+        text += "Нет публикаций"
     
-    # Статистика по типам
-    if media_stats:
-        stats_text += f"\n*📊 По типам контента:*\n"
-        for media_type, count in media_stats:
-            if media_type == "photo":
-                icon = "📸 Фото (оформленное)"
-            elif media_type == "video":
-                icon = "🎬 Видео"
-            elif media_type == "document_image":
-                icon = "📄 Документ-изображение"
-            elif media_type == "photo_group":
-                icon = "🖼️ Группа фото"
-            elif media_type == "video_photo_mixed":
-                icon = "🎬📸 Видео + Фото"
-            else:
-                icon = "📝 Текст"
-            stats_text += f"  • {icon}: {count}\n"
-    
-    # Последние публикации
-    if last_posts:
-        stats_text += f"\n*🕐 Последние 5 публикаций:*\n"
-        for title, date, media_type in last_posts:
-            if media_type == "photo":
-                icon = "📸"
-            elif media_type == "video":
-                icon = "🎬"
-            elif media_type == "document_image":
-                icon = "📄"
-            elif media_type == "photo_group":
-                icon = "🖼️"
-            elif media_type == "video_photo_mixed":
-                icon = "🎬📸"
-            else:
-                icon = "📝"
-            stats_text += f"  • {icon} {title[:40]}... ({date.strftime('%d.%m %H:%M')})\n"
-    
-    await update.message.reply_text(stats_text, parse_mode=ParseMode.MARKDOWN)
-
-async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Очищает историю"""
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "DELETE FROM republished_posts WHERE channel_id = ?",
-            (SOURCE_CHANNEL_ID,)
-        )
-        conn.execute(
-            "DELETE FROM failed_posts WHERE channel_id = ?",
-            (SOURCE_CHANNEL_ID,)
-        )
-        conn.execute(
-            "DELETE FROM processed_messages WHERE channel_id = ?",
-            (SOURCE_CHANNEL_ID,)
-        )
-    await update.message.reply_text("✅ История очищена!")
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 # ==================== ЗАПУСК ====================
 async def run_bot():
-    """Запуск бота"""
+    """Главный цикл бота"""
     init_db()
     
     print("\n" + "="*50)
-    print("🤖 БОТ-РЕПОСТЕР НОВОСТЕЙ")
+    print("🤖 БОТ-РЕПОСТЕР НОВОСТЕЙ (POLLING)")
     print("="*50)
     print(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
     print(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
     print(f"🤖 DeepSeek AI: {'✅ Подключен' if deepseek_client else '❌ Не настроен'}")
-    print(f"🎨 Оформление фото: ✅ Включено")
-    print(f"🎬 Видео: Без оформления, только текст")
-    print(f"📸 Медиа-группы: Первое фото оформляется, остальные без изменений")
     print("="*50 + "\n")
     
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Команды
+    # Добавляем команды
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("stats", stats))
-    application.add_handler(CommandHandler("clear", clear_history))
     
-    # Обработчик новых постов в канале
-    application.add_handler(MessageHandler(
-        filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL,
-        handle_new_channel_post
-    ))
-    
-    # Запускаем бота
+    # Запускаем
     await application.initialize()
     await application.start()
-    await application.updater.start_polling(
-        allowed_updates=["message", "channel_post"],
-        drop_pending_updates=True,
-        poll_interval=1.0,
-        timeout=30
-    )
     
-    print("✅ Бот запущен и работает!")
-    print("⚡ Ожидание новых постов в канале-источнике...")
+    # Удаляем webhook (ВАЖНО!)
+    try:
+        print("🔄 Удаляем webhook...")
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        print("✅ Webhook удален")
+    except Exception as e:
+        print(f"⚠️ Ошибка удаления webhook: {e}")
     
-    # Держим бота запущенным
+    # Ждем
+    await asyncio.sleep(2)
+    
+    # Запускаем polling с игнорированием ошибок конфликта
+    try:
+        print("🔄 Запускаем polling...")
+        await application.updater.start_polling(
+            allowed_updates=["message", "channel_post"],
+            drop_pending_updates=True,
+            poll_interval=1.0,
+            timeout=30
+        )
+        print("✅ Бот запущен!")
+    except Exception as e:
+        print(f"⚠️ Ошибка запуска polling: {e}")
+        print("🔄 Пробуем еще раз через 5 секунд...")
+        await asyncio.sleep(5)
+        await application.updater.start_polling(
+            allowed_updates=["message", "channel_post"],
+            drop_pending_updates=True,
+            poll_interval=1.0,
+            timeout=30
+        )
+        print("✅ Бот запущен со второй попытки!")
+    
+    # Основной цикл проверки новых постов
+    print("⚡ Постоянная проверка новых постов...")
     while True:
-        await asyncio.sleep(1)
+        try:
+            # Проверяем каждую минуту
+            await check_and_process(application.bot)
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"❌ Ошибка в цикле: {e}")
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
-        print("❌ Ошибка: BOT_TOKEN не задан!")
+        print("❌ BOT_TOKEN не задан!")
         exit(1)
     
     if not SOURCE_CHANNEL_ID:
-        print("❌ Ошибка: SOURCE_CHANNEL_ID не задан!")
+        print("❌ SOURCE_CHANNEL_ID не задан!")
         exit(1)
     
     if not TARGET_CHANNEL_ID:
-        print("❌ Ошибка: TARGET_CHANNEL_ID не задан!")
+        print("❌ TARGET_CHANNEL_ID не задан!")
         exit(1)
     
     if not DEEPSEEK_API_KEY:
-        print("⚠️ Предупреждение: DEEPSEEK_API_KEY не задан! Будет работать без AI.")
+        print("⚠️ DeepSeek не настроен, будет работать без AI")
     
     asyncio.run(run_bot())
-# ==================== HEALTH CHECK ====================
-from fastapi import FastAPI
-
-app = FastAPI()
-
-@app.get("/health")
-async def health():
-    return {"status": "ok", "mode": "webhook"}
-
-# Запускаем FastAPI в отдельном потоке
-import threading
-import uvicorn
-
-def run_health_server():
-    port = int(os.getenv("PORT", 10000)) + 1
-    uvicorn.run(app, host="0.0.0.0", port=port)
-
-# Запускаем health check сервер
-threading.Thread(target=run_health_server, daemon=True).start()
