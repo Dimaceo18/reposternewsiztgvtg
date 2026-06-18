@@ -13,4 +13,4 @@ COPY . .
 
 RUN mkdir -p fonts
 
-CMD ["python", "bot.py"]
+CMD ["python", "bot_webhook_fixed.py"]
