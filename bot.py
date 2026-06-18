@@ -1074,3 +1074,22 @@ if __name__ == "__main__":
         print("⚠️ Предупреждение: DEEPSEEK_API_KEY не задан! Будет работать без AI.")
     
     asyncio.run(run_bot())
+# ==================== HEALTH CHECK ====================
+from fastapi import FastAPI
+
+app = FastAPI()
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "mode": "webhook"}
+
+# Запускаем FastAPI в отдельном потоке
+import threading
+import uvicorn
+
+def run_health_server():
+    port = int(os.getenv("PORT", 10000)) + 1
+    uvicorn.run(app, host="0.0.0.0", port=port)
+
+# Запускаем health check сервер
+threading.Thread(target=run_health_server, daemon=True).start()
