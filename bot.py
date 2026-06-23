@@ -31,6 +31,11 @@ DB_PATH = "republished.db"
 # Настройки для оформления фото
 FONT_PATH = os.getenv("FONT_PATH", "Montserrat-Black.ttf")
 
+# ==================== НАСТРОЙКИ ДЛЯ КНОПКИ ====================
+# Ссылка для кнопки (можно указать полную ссылку или имя канала)
+BUTTON_URL = os.getenv("BUTTON_URL", "")  # Например: "https://t.me/mychannel" или "@mychannel"
+BUTTON_TEXT = os.getenv("BUTTON_TEXT", "📢 Подписаться на канал")  # Текст кнопки
+
 # ==================== ПРОВЕРКА НАСТРОЕК ====================
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не задан!")
@@ -47,6 +52,13 @@ if not TARGET_CHANNEL_ID:
 logger.info(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
 logger.info(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
 logger.info(f"🤖 DeepSeek AI: {'✅ Подключен' if DEEPSEEK_API_KEY else '❌ Не настроен'}")
+
+# Логируем настройки кнопки
+if BUTTON_URL:
+    logger.info(f"🔗 Ссылка для кнопки: {BUTTON_URL}")
+    logger.info(f"📝 Текст кнопки: {BUTTON_TEXT}")
+else:
+    logger.info("ℹ️ Кнопка не настроена (BUTTON_URL не задан)")
 
 # ==================== ПРОМПТЫ ДЛЯ DEEPSEEK ====================
 DEEPSEEK_PROMPT = """Перепиши новость в новостном формате на 600-650 символов.
@@ -438,10 +450,25 @@ def parse_ai_response(content: str) -> Tuple[str, str]:
     return title, body
 
 def get_post_publish_keyboard():
-    # Извлекаем имя канала из ID
-    channel_name = TARGET_CHANNEL_ID.replace('-100', '')
+    """Создает клавиатуру с кнопкой для подписки"""
+    # Если BUTTON_URL не задан, возвращаем None (без кнопки)
+    if not BUTTON_URL:
+        return None
+    
+    # Обрабатываем ссылку
+    url = BUTTON_URL.strip()
+    
+    # Если ссылка начинается с @, преобразуем в полную ссылку
+    if url.startswith('@'):
+        url = f"https://t.me/{url[1:]}"
+    # Если ссылка не начинается с http, добавляем https://t.me/
+    elif not url.startswith('http'):
+        url = f"https://t.me/{url}"
+    
+    logger.info(f"🔗 Создаем кнопку со ссылкой: {url}")
+    
     keyboard = [
-        [InlineKeyboardButton("📢 Подписаться на канал", url=f"https://t.me/{channel_name}")],
+        [InlineKeyboardButton(BUTTON_TEXT, url=url)],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -489,6 +516,13 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
         has_media = False
         media_type = None
         
+        # Получаем клавиатуру (если настроена)
+        reply_markup = get_post_publish_keyboard()
+        if reply_markup:
+            logger.info("✅ Кнопка добавлена к посту")
+        else:
+            logger.info("ℹ️ Кнопка не добавлена (BUTTON_URL не задан)")
+        
         # Проверяем наличие медиа
         if message.photo:
             logger.info("📸 Обрабатываем фото...")
@@ -503,7 +537,7 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                     photo=InputFile(processed_photo, filename="post.jpg"),
                     caption=caption,
                     parse_mode=ParseMode.HTML,
-                    reply_markup=get_post_publish_keyboard()
+                    reply_markup=reply_markup
                 )
                 has_media = True
                 media_type = "photo"
@@ -531,7 +565,7 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
                 caption=caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_post_publish_keyboard()
+                reply_markup=reply_markup
             )
             has_media = True
             media_type = "video"
@@ -550,7 +584,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                         chat_id=target_channel_id,
                         photo=InputFile(processed_photo, filename=doc.file_name or "document.jpg"),
                         caption=caption,
-                        parse_mode=ParseMode.HTML
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
                     )
                     has_media = True
                     media_type = "document_image"
@@ -579,7 +614,7 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 chat_id=target_channel_id,
                 text=caption,
                 parse_mode=ParseMode.HTML,
-                reply_markup=get_post_publish_keyboard()
+                reply_markup=reply_markup
             )
         
         # Сохраняем в БД
@@ -668,12 +703,17 @@ async def check_and_process(bot: Bot):
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем настройки кнопки
+    button_status = "✅ Настроена" if BUTTON_URL else "❌ Не настроена"
+    
     await update.message.reply_text(
         "🤖 *Бот-репостер новостей*\n\n"
         "Я автоматически забираю посты из одного канала, адаптирую их через ИИ и публикую в другом.\n\n"
         f"📥 *Источник:* {SOURCE_CHANNEL_ID}\n"
         f"📤 *Целевой канал:* {TARGET_CHANNEL_ID}\n"
-        f"🤖 *DeepSeek AI:* {'✅ Подключен' if deepseek_client else '❌ Не настроен'}\n\n"
+        f"🤖 *DeepSeek AI:* {'✅ Подключен' if deepseek_client else '❌ Не настроен'}\n"
+        f"🔗 *Кнопка:* {button_status}\n"
+        f"📝 *Текст кнопки:* {BUTTON_TEXT if BUTTON_URL else '—'}\n\n"
         "Команды:\n"
         "/start - Это сообщение\n"
         "/status - Статус\n"
@@ -699,12 +739,15 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (SOURCE_CHANNEL_ID,)
         ).fetchone()[0]
     
+    button_status = "✅" if BUTTON_URL else "❌"
+    
     await update.message.reply_text(
         f"📊 *Статус*\n\n"
         f"📝 Обработано: {count}\n"
         f"❌ Ошибок: {failed}\n"
         f"🕐 Последняя: {last or 'Нет'}\n"
-        f"🤖 AI: {'✅' if deepseek_client else '❌'}",
+        f"🤖 AI: {'✅' if deepseek_client else '❌'}\n"
+        f"🔗 Кнопка: {button_status}",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -750,6 +793,10 @@ async def run_bot():
     logger.info(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
     logger.info(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
     logger.info(f"🤖 DeepSeek AI: {'✅ Подключен' if deepseek_client else '❌ Не настроен'}")
+    logger.info(f"🔗 Кнопка: {'✅ Настроена' if BUTTON_URL else '❌ Не настроена'}")
+    if BUTTON_URL:
+        logger.info(f"   Ссылка: {BUTTON_URL}")
+        logger.info(f"   Текст: {BUTTON_TEXT}")
     logger.info("="*50 + "\n")
     
     # Создаем приложение
