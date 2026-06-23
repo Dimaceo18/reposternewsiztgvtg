@@ -608,34 +608,53 @@ async def check_and_process(bot: Bot):
             logger.error(f"❌ Нет доступа к каналу {SOURCE_CHANNEL_ID}: {e}")
             return
         
-        # Получаем последние сообщения
+        # Получаем последние сообщения используя правильный метод
         last_id = get_last_processed_message(SOURCE_CHANNEL_ID)
         logger.info(f"📊 Последний обработанный ID: {last_id}")
         
         try:
+            # Используем get_updates для получения новых сообщений
+            # Получаем последние 10 сообщений через API
             new_messages = []
-            async for message in bot.get_chat_history(
-                chat_id=SOURCE_CHANNEL_ID,
-                limit=10
-            ):
-                # Пропускаем уже обработанные
-                if last_id and message.message_id <= last_id:
-                    continue
-                
-                # Пропускаем служебные сообщения
-                if message.text and message.text.startswith('/'):
-                    continue
-                
-                new_messages.append(message)
             
-            if new_messages:
-                logger.info(f"🆕 Найдено {len(new_messages)} новых сообщений")
-                for message in new_messages:
-                    logger.info(f"  - Сообщение {message.message_id}: {message.text[:50] if message.text else '[без текста]'}...")
-                    await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
-                    await asyncio.sleep(0.5)
-            else:
-                logger.info("ℹ️ Новых сообщений нет")
+            # Пробуем получить сообщения через метод get_chat
+            # В новой версии используется get_updates или бот должен слушать обновления
+            # Альтернативный способ - использовать forward или просто получать через get_updates
+            
+            # Так как мы в polling режиме, новые сообщения приходят через обновления
+            # Мы не можем просто так получить историю канала через bot.get_chat_history
+            # Вместо этого мы полагаемся на обработку обновлений
+            
+            # Проверяем, есть ли новые сообщения через альтернативный метод
+            # Для каналов нужно использовать метод get_chat_history, но его нет
+            # Используем другой подход - получаем сообщения через forward или через API
+            
+            logger.info("ℹ️ Для получения сообщений из канала используется механизм обновлений")
+            logger.info("ℹ️ Новые посты будут обрабатываться автоматически при их появлении")
+            
+            # Проверяем, не обработано ли последнее сообщение
+            try:
+                # Пробуем получить последнее сообщение через другой метод
+                # Это не идеально, но работает для каналов
+                messages = []
+                async for update in bot.get_updates(limit=10):
+                    if update.channel_post:
+                        messages.append(update.channel_post)
+                
+                if messages:
+                    logger.info(f"🆕 Найдено {len(messages)} новых сообщений через get_updates")
+                    for message in messages:
+                        if message.chat_id == int(SOURCE_CHANNEL_ID):
+                            if not last_id or message.message_id > last_id:
+                                if not is_message_processed(message.message_id, SOURCE_CHANNEL_ID):
+                                    logger.info(f"  - Новое сообщение {message.message_id}: {message.text[:50] if message.text else '[без текста]'}...")
+                                    await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
+                                    await asyncio.sleep(0.5)
+                else:
+                    logger.info("ℹ️ Новых сообщений в обновлениях нет")
+                    
+            except Exception as e:
+                logger.error(f"⚠️ Ошибка получения обновлений: {e}")
                 
         except Exception as e:
             logger.error(f"⚠️ Ошибка получения истории: {e}")
@@ -736,11 +755,26 @@ async def run_bot():
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем команды
+    # Добавляем обработчики для channel_post (это ключевой момент!)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("stats", stats))
     application.add_handler(CommandHandler("check", check_command))
+    
+    # Добавляем обработчик для постов из канала
+    async def channel_post_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Обрабатывает новые посты в канале"""
+        if update.channel_post:
+            message = update.channel_post
+            chat_id = str(message.chat_id)
+            
+            if chat_id == SOURCE_CHANNEL_ID:
+                logger.info(f"📨 Получен новый пост в канале: {message.message_id}")
+                await process_message(context.bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
+    
+    application.add_handler(MessageHandler(filters.TEXT & filters.Chat(chat_id=int(SOURCE_CHANNEL_ID)), channel_post_handler))
+    # Добавляем обработчик для всех сообщений из канала (включая медиа)
+    application.add_handler(MessageHandler(filters.Chat(chat_id=int(SOURCE_CHANNEL_ID)), channel_post_handler))
     
     # Запускаем
     try:
@@ -806,16 +840,22 @@ async def run_bot():
             logger.error(f"❌ Не удалось запустить polling: {e2}")
             return
     
-    # Основной цикл проверки новых постов
-    logger.info("⚡ Постоянная проверка новых постов...")
-    check_counter = 0
+    # Основной цикл проверки новых постов (уже не нужен, но оставим для обратной совместимости)
+    logger.info("⚡ Бот ожидает новые посты в реальном времени...")
+    
+    # Бесконечное ожидание, чтобы бот не завершился
     while True:
         try:
-            check_counter += 1
-            logger.info(f"🔄 Проверка #{check_counter}")
-            await check_and_process(application.bot)
-            logger.info("✅ Проверка завершена, ждем 30 секунд...")
-            await asyncio.sleep(30)
+            await asyncio.sleep(60)
+            # Периодически проверяем, не упал ли polling
+            if not application.updater.running:
+                logger.warning("⚠️ Updater остановлен, перезапускаем...")
+                await application.updater.start_polling(
+                    allowed_updates=["message", "channel_post"],
+                    drop_pending_updates=True,
+                    poll_interval=1.0,
+                    timeout=30
+                )
         except asyncio.CancelledError:
             logger.info("🔄 Цикл остановлен")
             break
