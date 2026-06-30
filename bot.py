@@ -32,21 +32,9 @@ DB_PATH = "republished.db"
 FONT_PATH = os.getenv("FONT_PATH", "Montserrat-Black.ttf")
 
 # ==================== НАСТРОЙКИ ДЛЯ КНОПКИ ====================
-BUTTON_URL = os.getenv("BUTTON_URL", "")
-BUTTON_TEXT = os.getenv("BUTTON_TEXT", "📢 Подписаться на канал")
-
-# ==================== НАСТРОЙКИ БРЕНДИРОВАНИЯ ====================
-BRAND_NAME = os.getenv("BRAND_NAME", "Fider.by")
-BRAND_TEAM = os.getenv("BRAND_TEAM", f"Команда {BRAND_NAME}")
-
-# ==================== НАСТРОЙКИ КОММЕНТАРИЯ ====================
-COMMENT_ENABLED = os.getenv("COMMENT_ENABLED", "true").lower() == "true"
-COMMENT_TEXT = os.getenv("COMMENT_TEXT", 
-    "ℹ️ Соблюдайте правила канала, не оскорбляйте других участников.\n\n"
-    "📱 А если Вам есть чем поделиться, пишите в наш бот: @fiderby_bot"
-)
-COMMENT_DELAY = int(os.getenv("COMMENT_DELAY", "2"))
-COMMENTS_CHAT_ID = os.getenv("COMMENTS_CHAT_ID", "")  # ID чата комментариев
+# Ссылка для кнопки (можно указать полную ссылку или имя канала)
+BUTTON_URL = os.getenv("BUTTON_URL", "")  # Например: "https://t.me/mychannel" или "@mychannel"
+BUTTON_TEXT = os.getenv("BUTTON_TEXT", "📢 Подписаться на канал")  # Текст кнопки
 
 # ==================== ПРОВЕРКА НАСТРОЕК ====================
 if not BOT_TOKEN:
@@ -64,24 +52,13 @@ if not TARGET_CHANNEL_ID:
 logger.info(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
 logger.info(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
 logger.info(f"🤖 DeepSeek AI: {'✅ Подключен' if DEEPSEEK_API_KEY else '❌ Не настроен'}")
-logger.info(f"🏷️ Бренд: {BRAND_NAME}")
 
+# Логируем настройки кнопки
 if BUTTON_URL:
     logger.info(f"🔗 Ссылка для кнопки: {BUTTON_URL}")
     logger.info(f"📝 Текст кнопки: {BUTTON_TEXT}")
 else:
     logger.info("ℹ️ Кнопка не настроена (BUTTON_URL не задан)")
-
-if COMMENT_ENABLED:
-    logger.info(f"💬 Комментарии включены")
-    if COMMENTS_CHAT_ID:
-        logger.info(f"📌 ID чата комментариев: {COMMENTS_CHAT_ID}")
-    else:
-        logger.info(f"📌 ID чата комментариев не задан, будет определен автоматически")
-    logger.info(f"📝 Текст комментария: {COMMENT_TEXT[:50]}...")
-    logger.info(f"⏱️ Задержка перед комментарием: {COMMENT_DELAY} сек")
-else:
-    logger.info("💬 Комментарии отключены")
 
 # ==================== ПРОМПТЫ ДЛЯ DEEPSEEK ====================
 DEEPSEEK_PROMPT = """Перепиши новость в новостном формате на 600-650 символов.
@@ -127,8 +104,7 @@ def init_db():
                     original_text TEXT,
                     adapted_text TEXT,
                     has_media BOOLEAN DEFAULT 0,
-                    media_type TEXT,
-                    adaptation_type TEXT
+                    media_type TEXT
                 )
             """)
             conn.execute("""
@@ -174,14 +150,14 @@ def save_processed_message(message_id: int, channel_id: str):
     except Exception as e:
         logger.error(f"Ошибка сохранения обработанного сообщения: {e}")
 
-def save_republished(message_id: int, channel_id: str, title: str, original_text: str, adapted_text: str, has_media: bool = False, media_type: str = None, adaptation_type: str = None):
+def save_republished(message_id: int, channel_id: str, title: str, original_text: str, adapted_text: str, has_media: bool = False, media_type: str = None):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO republished_posts 
-                   (message_id, channel_id, title, republished_at, original_text, adapted_text, has_media, media_type, adaptation_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (message_id, channel_id, title, datetime.now(), original_text, adapted_text, has_media, media_type, adaptation_type)
+                   (message_id, channel_id, title, republished_at, original_text, adapted_text, has_media, media_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (message_id, channel_id, title, datetime.now(), original_text, adapted_text, has_media, media_type)
             )
     except Exception as e:
         logger.error(f"Ошибка сохранения републикации: {e}")
@@ -227,67 +203,17 @@ def remove_emojis(text: str) -> str:
     )
     return emoji_pattern.sub(r'', text)
 
-def truncate_text(text: str, max_length: int = 1000, add_ellipsis: bool = True) -> str:
-    """
-    Обрезает текст до указанной длины, сохраняя целостность слов
-    """
-    if not text:
-        return ""
-    
-    # Удаляем HTML теги для подсчета символов
-    clean_text = re.sub(r'<[^>]+>', '', text)
-    
-    if len(clean_text) <= max_length:
-        return text
-    
-    # Обрезаем по словам
-    words = text.split()
-    result = []
-    current_length = 0
-    
-    for word in words:
-        # Проверяем, поместится ли слово (без HTML тегов)
-        clean_word = re.sub(r'<[^>]+>', '', word)
-        if current_length + len(clean_word) + 1 <= max_length - (3 if add_ellipsis else 0):
-            result.append(word)
-            current_length += len(clean_word) + 1
-        else:
-            break
-    
-    truncated = ' '.join(result)
-    
-    # Добавляем многоточие, если нужно
-    if add_ellipsis and len(truncated) < len(clean_text):
-        # Удаляем последний HTML тег, если он неполный
-        if truncated.endswith('>'):
-            last_space = truncated.rfind(' ')
-            if last_space > 0:
-                truncated = truncated[:last_space]
-        truncated += '...'
-    
-    return truncated
-
-def format_caption(title: str, body: str, max_length: int = 1000) -> str:
-    """
-    Форматирует подпись и обрезает до указанной длины
-    """
+def format_caption(title: str, body: str) -> str:
     title = remove_emojis(title) if title else ""
     body = remove_emojis(body) if body else ""
     
     if not title and not body:
         return ""
-    
-    # Формируем подпись
     if title and not body:
-        caption = f"<b>{title}</b>"
-    elif not title and body:
-        # Если нет заголовка, возвращаем только тело (без форматирования)
-        caption = body
-    else:
-        caption = f"<b>{title}</b>\n\n{body}"
-    
-    # Обрезаем до максимальной длины
-    return truncate_text(caption, max_length, add_ellipsis=True)
+        return f"<b>{title}</b>"
+    if not title and body:
+        return body
+    return f"<b>{title}</b>\n\n{body}"
 
 def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[str]:
     words = text.split()
@@ -435,7 +361,7 @@ async def call_deepseek_with_retry(prompt: str, text: str, max_attempts: int = 2
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": current_prompt},
-                    {"role": "user", "content": f"Перепиши этот текст:\n\n{current_text}"}
+                    {"role": "user", "content": f"Перепиши эту новость в новостном формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
                 ],
                 temperature=0.7,
                 max_tokens=1000
@@ -449,13 +375,22 @@ async def call_deepseek_with_retry(prompt: str, text: str, max_attempts: int = 2
         try:
             content = await make_request(prompt, text)
             
-            if not content or len(content.strip()) < 20:
+            if not content or len(content.strip()) < 50:
                 logger.warning(f"Попытка {attempt + 1}: Получен пустой или слишком короткий ответ")
                 if attempt == max_attempts - 1:
-                    return ""
+                    return content
                 continue
             
-            return content
+            char_count = len(content)
+            logger.info(f"Попытка {attempt + 1}: Получен текст длиной {char_count} символов")
+            
+            if 550 <= char_count <= 700 or attempt == max_attempts - 1:
+                return content
+            
+            if char_count < 550:
+                text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 600-650). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
+            else:
+                text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 600-650). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
                 
         except Exception as e:
             logger.error(f"Ошибка при попытке {attempt + 1}: {e}")
@@ -514,182 +449,19 @@ def parse_ai_response(content: str) -> Tuple[str, str]:
     
     return title, body
 
-async def adapt_text_by_length(text: str) -> Tuple[str, str, str]:
-    """
-    Адаптирует текст в зависимости от его длины:
-    - Короткие тексты (до 200 символов): небольшая адаптация (только текст, без заголовка)
-    - Средние тексты (200-300 символов): умеренная адаптация
-    - Длинные тексты (300-500 символов): полная переработка в новостном формате
-    - Очень длинные тексты (500+ символов): журналистский стиль с брендированием (1 упоминание)
-    
-    Возвращает: (заголовок, тело, тип_адаптации)
-    """
-    if not text:
-        return "", "", "original"
-    
-    text_length = len(text)
-    logger.info(f"📊 Длина текста: {text_length} символов")
-    
-    # Если AI не настроен, используем оригинальный текст
-    if not deepseek_client:
-        logger.info("ℹ️ AI не настроен, используем оригинальный текст")
-        if text_length <= 200:
-            return "", text, "original"
-        else:
-            title = text[:70].strip()
-            body = text[70:] if len(text) > 70 else text
-            return title, body, "original"
-    
-    try:
-        # Короткий текст (до 200 символов) - легкая адаптация, ТОЛЬКО ТЕКСТ
-        if text_length <= 200:
-            logger.info("📝 Короткий текст (≤200 символов) - применяем легкую адаптацию (только текст)")
-            
-            short_prompt = """Адаптируй этот короткий текст для публикации в новостном канале. 
-Сделай текст более читаемым, убери смайлики и лишние символы, но сохрани все факты. 
-НЕ переписывай полностью, а лишь слегка отредактируй.
-Если текст уже хороший, можешь оставить его как есть.
-
-ВАЖНО: 
-- Не создавай отдельный заголовок! Только основной текст.
-- Сохрани все факты, цифры, имена
-- Удали смайлики и эмодзи
-- Сделай текст грамотным и читаемым
-- НЕ добавляй новые факты
-- НЕ увеличивай объем текста более чем на 20%
-
-Ответ должен быть только в виде основного текста, без заголовка."""
-
-            response = await call_deepseek_with_retry(short_prompt, text, max_attempts=1)
-            
-            if response and len(response.strip()) > 10:
-                if len(response) <= text_length * 1.3:
-                    logger.info(f"✅ Легкая адаптация выполнена (было {text_length}, стало {len(response)})")
-                    return "", response.strip(), "light_adaptation"
-                else:
-                    logger.warning(f"⚠️ Ответ AI слишком длинный ({len(response)} > {text_length * 1.3}), используем оригинал")
-            
-            return "", text, "original"
-        
-        # Средний текст (200-300 символов) - умеренная адаптация
-        elif 200 < text_length <= 300:
-            logger.info("📝 Средний текст (200-300 символов) - применяем умеренную адаптацию")
-            
-            medium_prompt = """Адаптируй этот текст для новостного канала. 
-Сделай текст более структурированным и читаемым.
-Удали смайлики, рекламу и кликбейт.
-
-Правила:
-- Сохрани все важные факты, цифры, даты, имена
-- Сделай текст грамотным и структурированным
-- Разбей на абзацы, если это уместно
-- Удали смайлики и эмодзи
-- Можно немного расширить текст, добавляя связки и пояснения
-- Итоговый текст должен быть примерно на 10-20% длиннее оригинала
-
-Ответ должен быть в формате:
-Заголовок (краткий и информативный)
-Пустая строка
-Основной текст (без маркеров "Заголовок:" и "Текст:")"""
-
-            response = await call_deepseek_with_retry(medium_prompt, text, max_attempts=2)
-            
-            if response and len(response.strip()) > 50:
-                if len(response) <= text_length * 1.5:
-                    logger.info(f"✅ Умеренная адаптация выполнена (было {text_length}, стало {len(response)})")
-                    title, body = parse_ai_response(response)
-                    return title, body, "medium_adaptation"
-                else:
-                    logger.warning(f"⚠️ Ответ AI слишком длинный ({len(response)} > {text_length * 1.5})")
-            
-            title = text[:70].strip()
-            body = text[70:] if len(text) > 70 else text
-            return title, body, "original"
-        
-        # Длинный текст (300-500 символов) - полная переработка
-        elif 300 < text_length <= 500:
-            logger.info("📝 Длинный текст (300-500 символов) - применяем полную переработку")
-            
-            response = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text, max_attempts=2)
-            
-            if response and len(response.strip()) > 100:
-                logger.info(f"✅ Полная переработка выполнена (было {text_length}, стало {len(response)})")
-                title, body = parse_ai_response(response)
-                return title, body, "full_adaptation"
-            else:
-                logger.warning("⚠️ Полная переработка не удалась, используем оригинал")
-                title = text[:70].strip()
-                body = text[70:] if len(text) > 70 else text
-                return title, body, "original"
-        
-        # Очень длинный текст (500+ символов) - журналистский стиль с брендированием (1 раз)
-        else:
-            logger.info("📝 Очень длинный текст (500+ символов) - применяем журналистский стиль с 1 упоминанием бренда")
-            
-            journalistic_prompt = f"""Перепиши эту новость в профессиональном журналистском стиле.
-
-ВАЖНО: Используй упоминание бренда ТОЛЬКО ОДИН РАЗ в самом начале новости! Не повторяй его больше.
-
-Используй ОДНУ из этих фраз в САМОМ НАЧАЛЕ (выбери одну):
-- "Как стало известно редакции {BRAND_NAME}, "
-- "{BRAND_TEAM} сообщает: "
-- "По информации {BRAND_NAME}, "
-
-Правила:
-- Сохрани ВСЕ важные факты, цифры, даты, имена, места
-- Используй упоминание {BRAND_NAME} ТОЛЬКО 1 РАЗ в первом предложении
-- Дальше пиши новость нейтральным журналистским стилем БЕЗ повторных упоминаний бренда
-- Разбей на 3-4 абзаца (пустая строка между абзацами)
-- Удали смайлики, рекламу, кликбейт, личные оценки
-- Сделай заголовок ярким и информативным
-- Объем: 600-700 символов
-
-ВАЖНО: НЕ пиши слова "Заголовок:" и "Текст:". Просто напиши сначала заголовок, потом пустую строку, потом текст.
-
-Пример правильного ответа (только 1 упоминание в начале):
-Новый парк открыли в Гродно
-
-Как стало известно редакции {BRAND_NAME}, в центре Гродно состоялось торжественное открытие нового парка культуры и отдыха. На мероприятии присутствовали городские власти и местные жители.
-
-Парк занимает площадь 5 гектаров. Здесь установлены современные скамейки, фонари и детская площадка.
-
-Полностью завершить благоустройство планируют к концу года. Жители города уже активно посещают новое общественное пространство."""
-
-            response = await call_deepseek_with_retry(journalistic_prompt, text, max_attempts=2)
-            
-            if response and len(response.strip()) > 150:
-                logger.info(f"✅ Журналистский стиль применен (было {text_length}, стало {len(response)})")
-                title, body = parse_ai_response(response)
-                return title, body, "journalistic"
-            else:
-                logger.warning("⚠️ Журналистский стиль не удался, пробуем стандартную переработку")
-                response = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text, max_attempts=1)
-                if response and len(response.strip()) > 100:
-                    title, body = parse_ai_response(response)
-                    return title, body, "full_adaptation_fallback"
-                else:
-                    title = text[:70].strip()
-                    body = text[70:] if len(text) > 70 else text
-                    return title, body, "original"
-                
-    except Exception as e:
-        logger.error(f"❌ Ошибка адаптации текста: {e}")
-        if text_length <= 200:
-            return "", text, "original"
-        else:
-            title = text[:70].strip()
-            body = text[70:] if len(text) > 70 else text
-            return title, body, "original"
-
 def get_post_publish_keyboard():
     """Создает клавиатуру с кнопкой для подписки"""
+    # Если BUTTON_URL не задан, возвращаем None (без кнопки)
     if not BUTTON_URL:
         return None
     
+    # Обрабатываем ссылку
     url = BUTTON_URL.strip()
     
+    # Если ссылка начинается с @, преобразуем в полную ссылку
     if url.startswith('@'):
         url = f"https://t.me/{url[1:]}"
+    # Если ссылка не начинается с http, добавляем https://t.me/
     elif not url.startswith('http'):
         url = f"https://t.me/{url}"
     
@@ -699,87 +471,6 @@ def get_post_publish_keyboard():
         [InlineKeyboardButton(BUTTON_TEXT, url=url)],
     ]
     return InlineKeyboardMarkup(keyboard)
-
-# ==================== ФУНКЦИЯ ДЛЯ КОММЕНТАРИЯ ====================
-async def get_comments_chat_id(bot: Bot, channel_id: str) -> Optional[str]:
-    """
-    Получает ID чата комментариев для канала
-    """
-    try:
-        # Получаем информацию о канале
-        chat = await bot.get_chat(channel_id)
-        
-        # Если у канала есть связанный чат для комментариев
-        if hasattr(chat, 'linked_chat_id') and chat.linked_chat_id:
-            comments_chat_id = chat.linked_chat_id
-            logger.info(f"✅ Найден чат комментариев: {comments_chat_id}")
-            return str(comments_chat_id)
-        else:
-            logger.warning("⚠️ У канала нет отдельного чата для комментариев")
-            return None
-    except Exception as e:
-        logger.error(f"❌ Ошибка получения чата комментариев: {e}")
-        return None
-
-async def send_comment_after_post(bot: Bot, channel_id: str, message_id: int):
-    """
-    Отправляет комментарий после публикации поста
-    Комментарий отправляется в чат комментариев (связанный с каналом)
-    """
-    if not COMMENT_ENABLED:
-        logger.info("ℹ️ Отправка комментариев отключена в настройках")
-        return False
-    
-    try:
-        # Небольшая задержка перед отправкой
-        if COMMENT_DELAY > 0:
-            await asyncio.sleep(COMMENT_DELAY)
-        
-        # Определяем ID чата для комментариев
-        comments_chat = None
-        
-        # Если задан явно в настройках
-        if COMMENTS_CHAT_ID:
-            comments_chat = COMMENTS_CHAT_ID
-            logger.info(f"📌 Используем ID чата комментариев из настроек: {comments_chat}")
-        else:
-            # Пробуем получить автоматически
-            comments_chat = await get_comments_chat_id(bot, channel_id)
-        
-        # Если чат комментариев найден, отправляем туда
-        if comments_chat:
-            await bot.send_message(
-                chat_id=comments_chat,
-                text=COMMENT_TEXT,
-                parse_mode=ParseMode.HTML
-            )
-            logger.info(f"✅ Комментарий отправлен в чат комментариев {comments_chat}")
-            return True
-        else:
-            # Если чат комментариев не найден, пробуем отправить в канал
-            logger.warning("⚠️ Чат комментариев не найден, отправляем в канал")
-            await bot.send_message(
-                chat_id=channel_id,
-                text=COMMENT_TEXT,
-                parse_mode=ParseMode.HTML
-            )
-            logger.info(f"✅ Комментарий отправлен в канал (как обычное сообщение)")
-            return True
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка отправки комментария: {e}")
-        # Пробуем отправить в основной канал как обычное сообщение
-        try:
-            await bot.send_message(
-                chat_id=channel_id,
-                text=COMMENT_TEXT,
-                parse_mode=ParseMode.HTML
-            )
-            logger.info(f"✅ Комментарий отправлен в канал (как обычное сообщение)")
-            return True
-        except Exception as e2:
-            logger.error(f"❌ Ошибка отправки комментария в канал: {e2}")
-            return False
 
 # ==================== ОБРАБОТКА СООБЩЕНИЙ ====================
 async def process_message(bot: Bot, message, source_channel_id: str, target_channel_id: str):
@@ -803,32 +494,27 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
         logger.info(f"📄 Длина текста: {len(text)} символов")
         logger.info(f"📄 Текст: {text[:200]}...")
         
-        # Адаптируем текст в зависимости от длины
-        title, body, adaptation_type = await adapt_text_by_length(text)
-        
-        # Если адаптация не дала результата, используем оригинал
-        if not title and not body:
-            if len(text) <= 200:
-                body = text
-                title = ""
-                adaptation_type = "original"
+        # Адаптируем текст через AI
+        if deepseek_client:
+            logger.info("🤖 Запрашиваем адаптацию текста через AI...")
+            adapted_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
+            if adapted_text and len(adapted_text.strip()) > 50:
+                title, body = parse_ai_response(adapted_text)
+                logger.info(f"✅ Текст адаптирован через AI. Заголовок: {title[:50]}...")
             else:
+                logger.warning("⚠️ AI не дал качественный ответ, используем оригинальный текст")
                 title = text[:70].strip()
                 body = text[70:] if len(text) > 70 else text
-                adaptation_type = "original"
-        
-        # Формируем подпись с ограничением длины
-        caption = format_caption(title, body, max_length=1000)
-        
-        # Логируем, что отправляем
-        if not title and body:
-            logger.info(f"📝 Отправляем только текст (без заголовка): {body[:100]}...")
+                adapted_text = text
         else:
-            logger.info(f"📝 Отправляем с заголовком: {title[:50]}...")
+            logger.info("ℹ️ AI не настроен, используем оригинальный текст")
+            title = text[:70].strip()
+            body = text[70:] if len(text) > 70 else text
+            adapted_text = text
         
+        caption = format_caption(title, body)
         has_media = False
         media_type = None
-        sent_message = None  # Сохраняем отправленное сообщение
         
         # Получаем клавиатуру (если настроена)
         reply_markup = get_post_publish_keyboard()
@@ -845,14 +531,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
             photo_bytes = await file.download_as_bytearray()
             
             try:
-                # Для коротких текстов без заголовка не оформляем фото
-                if title:
-                    processed_photo = process_photo(photo_bytes, title)
-                else:
-                    first_line = body.split('\n')[0][:50] if body else "Новость"
-                    processed_photo = process_photo(photo_bytes, first_line)
-                
-                sent_message = await bot.send_photo(
+                processed_photo = process_photo(photo_bytes, title)
+                await bot.send_photo(
                     chat_id=target_channel_id,
                     photo=InputFile(processed_photo, filename="post.jpg"),
                     caption=caption,
@@ -864,26 +544,15 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 logger.info(f"✅ Опубликовано оформленное фото в {target_channel_id}")
             except Exception as e:
                 logger.error(f"⚠️ Ошибка оформления: {e}")
-                try:
-                    sent_message = await bot.send_photo(
-                        chat_id=target_channel_id,
-                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup
-                    )
-                    has_media = True
-                    media_type = "photo"
-                    logger.info(f"✅ Опубликовано оригинальное фото в {target_channel_id}")
-                except Exception as e2:
-                    logger.error(f"❌ Ошибка отправки фото: {e2}")
-                    sent_message = await bot.send_message(
-                        chat_id=target_channel_id,
-                        text=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup
-                    )
-                    logger.info(f"✅ Опубликован только текст (фото не удалось отправить)")
+                await bot.send_photo(
+                    chat_id=target_channel_id,
+                    photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                    caption=caption,
+                    parse_mode=ParseMode.HTML
+                )
+                has_media = True
+                media_type = "photo"
+                logger.info(f"✅ Опубликовано оригинальное фото в {target_channel_id}")
         
         elif message.video:
             logger.info("🎬 Обрабатываем видео...")
@@ -891,26 +560,16 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
             file = await bot.get_file(video.file_id)
             video_bytes = await file.download_as_bytearray()
             
-            try:
-                sent_message = await bot.send_video(
-                    chat_id=target_channel_id,
-                    video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup
-                )
-                has_media = True
-                media_type = "video"
-                logger.info(f"✅ Опубликовано видео в {target_channel_id}")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки видео: {e}")
-                sent_message = await bot.send_message(
-                    chat_id=target_channel_id,
-                    text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup
-                )
-                logger.info(f"✅ Опубликован только текст (видео не удалось отправить)")
+            await bot.send_video(
+                chat_id=target_channel_id,
+                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=reply_markup
+            )
+            has_media = True
+            media_type = "video"
+            logger.info(f"✅ Опубликовано видео в {target_channel_id}")
         
         elif message.document:
             doc = message.document
@@ -920,13 +579,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 file_bytes = await file.download_as_bytearray()
                 
                 try:
-                    if title:
-                        processed_photo = process_photo(file_bytes, title)
-                    else:
-                        first_line = body.split('\n')[0][:50] if body else "Новость"
-                        processed_photo = process_photo(file_bytes, first_line)
-                    
-                    sent_message = await bot.send_photo(
+                    processed_photo = process_photo(file_bytes, title)
+                    await bot.send_photo(
                         chat_id=target_channel_id,
                         photo=InputFile(processed_photo, filename=doc.file_name or "document.jpg"),
                         caption=caption,
@@ -938,52 +592,35 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                     logger.info(f"✅ Опубликовано оформленное изображение из документа")
                 except Exception as e:
                     logger.error(f"⚠️ Ошибка оформления документа: {e}")
-                    try:
-                        sent_message = await bot.send_photo(
-                            chat_id=target_channel_id,
-                            photo=InputFile(io.BytesIO(file_bytes), filename=doc.file_name or "document.jpg"),
-                            caption=caption,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=reply_markup
-                        )
-                        has_media = True
-                        media_type = "document_image"
-                        logger.info(f"✅ Опубликовано оригинальное изображение из документа")
-                    except Exception as e2:
-                        logger.error(f"❌ Ошибка отправки документа: {e2}")
-                        sent_message = await bot.send_message(
-                            chat_id=target_channel_id,
-                            text=caption,
-                            parse_mode=ParseMode.HTML,
-                            reply_markup=reply_markup
-                        )
+                    await bot.send_photo(
+                        chat_id=target_channel_id,
+                        photo=InputFile(io.BytesIO(file_bytes), filename=doc.file_name or "document.jpg"),
+                        caption=caption,
+                        parse_mode=ParseMode.HTML
+                    )
+                    has_media = True
+                    media_type = "document_image"
             else:
                 logger.info("📝 Отправляем только текст (документ не изображение)")
-                sent_message = await bot.send_message(
+                await bot.send_message(
                     chat_id=target_channel_id,
                     text=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup
+                    parse_mode=ParseMode.HTML
                 )
         
         else:
             logger.info("📝 Только текст...")
-            sent_message = await bot.send_message(
+            await bot.send_message(
                 chat_id=target_channel_id,
                 text=caption,
                 parse_mode=ParseMode.HTML,
                 reply_markup=reply_markup
             )
         
-        # Отправляем комментарий после успешной публикации
-        if sent_message:
-            await send_comment_after_post(bot, target_channel_id, sent_message.message_id)
-        
         # Сохраняем в БД
-        adapted_text = f"{title}\n\n{body}" if title and body else body
-        save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type, adaptation_type)
+        save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type)
         save_processed_message(message_id, source_channel_id)
-        logger.info(f"✅ Сообщение {message_id} успешно обработано (тип: {adaptation_type}) и сохранено")
+        logger.info(f"✅ Сообщение {message_id} успешно обработано и сохранено")
         
     except Exception as e:
         logger.error(f"❌ Ошибка обработки сообщения {message_id}: {e}")
@@ -992,10 +629,82 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
         save_failed(message_id, source_channel_id, str(e))
         save_processed_message(message_id, source_channel_id)
 
+# ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
+async def check_and_process(bot: Bot):
+    """Проверяет новые посты в канале"""
+    try:
+        logger.info("🔍 Начинаем проверку канала...")
+        
+        # Проверяем доступ к каналу
+        try:
+            chat = await bot.get_chat(SOURCE_CHANNEL_ID)
+            logger.info(f"✅ Доступ к каналу: {chat.title} (ID: {chat.id})")
+        except Exception as e:
+            logger.error(f"❌ Нет доступа к каналу {SOURCE_CHANNEL_ID}: {e}")
+            return
+        
+        # Получаем последние сообщения используя правильный метод
+        last_id = get_last_processed_message(SOURCE_CHANNEL_ID)
+        logger.info(f"📊 Последний обработанный ID: {last_id}")
+        
+        try:
+            # Используем get_updates для получения новых сообщений
+            # Получаем последние 10 сообщений через API
+            new_messages = []
+            
+            # Пробуем получить сообщения через метод get_chat
+            # В новой версии используется get_updates или бот должен слушать обновления
+            # Альтернативный способ - использовать forward или просто получать через get_updates
+            
+            # Так как мы в polling режиме, новые сообщения приходят через обновления
+            # Мы не можем просто так получить историю канала через bot.get_chat_history
+            # Вместо этого мы полагаемся на обработку обновлений
+            
+            # Проверяем, есть ли новые сообщения через альтернативный метод
+            # Для каналов нужно использовать метод get_chat_history, но его нет
+            # Используем другой подход - получаем сообщения через forward или через API
+            
+            logger.info("ℹ️ Для получения сообщений из канала используется механизм обновлений")
+            logger.info("ℹ️ Новые посты будут обрабатываться автоматически при их появлении")
+            
+            # Проверяем, не обработано ли последнее сообщение
+            try:
+                # Пробуем получить последнее сообщение через другой метод
+                # Это не идеально, но работает для каналов
+                messages = []
+                async for update in bot.get_updates(limit=10):
+                    if update.channel_post:
+                        messages.append(update.channel_post)
+                
+                if messages:
+                    logger.info(f"🆕 Найдено {len(messages)} новых сообщений через get_updates")
+                    for message in messages:
+                        if message.chat_id == int(SOURCE_CHANNEL_ID):
+                            if not last_id or message.message_id > last_id:
+                                if not is_message_processed(message.message_id, SOURCE_CHANNEL_ID):
+                                    logger.info(f"  - Новое сообщение {message.message_id}: {message.text[:50] if message.text else '[без текста]'}...")
+                                    await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
+                                    await asyncio.sleep(0.5)
+                else:
+                    logger.info("ℹ️ Новых сообщений в обновлениях нет")
+                    
+            except Exception as e:
+                logger.error(f"⚠️ Ошибка получения обновлений: {e}")
+                
+        except Exception as e:
+            logger.error(f"⚠️ Ошибка получения истории: {e}")
+            import traceback
+            traceback.print_exc()
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка проверки: {e}")
+        import traceback
+        traceback.print_exc()
+
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Проверяем настройки кнопки
     button_status = "✅ Настроена" if BUTTON_URL else "❌ Не настроена"
-    comment_status = "✅ Включены" if COMMENT_ENABLED else "❌ Отключены"
     
     await update.message.reply_text(
         "🤖 *Бот-репостер новостей*\n\n"
@@ -1003,15 +712,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📥 *Источник:* {SOURCE_CHANNEL_ID}\n"
         f"📤 *Целевой канал:* {TARGET_CHANNEL_ID}\n"
         f"🤖 *DeepSeek AI:* {'✅ Подключен' if deepseek_client else '❌ Не настроен'}\n"
-        f"🏷️ *Бренд:* {BRAND_NAME}\n"
         f"🔗 *Кнопка:* {button_status}\n"
-        f"💬 *Комментарии:* {comment_status}\n"
         f"📝 *Текст кнопки:* {BUTTON_TEXT if BUTTON_URL else '—'}\n\n"
-        "📊 *Типы адаптации:*\n"
-        "• ≤200 символов: легкая редактура (без заголовка)\n"
-        "• 200-300 символов: умеренная адаптация\n"
-        "• 300-500 символов: полная переработка\n"
-        "• 500+ символов: журналистский стиль\n\n"
         "Команды:\n"
         "/start - Это сообщение\n"
         "/status - Статус\n"
@@ -1036,42 +738,18 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT MAX(republished_at) FROM republished_posts WHERE channel_id = ?",
             (SOURCE_CHANNEL_ID,)
         ).fetchone()[0]
-        
-        adaptation_stats = conn.execute(
-            """SELECT adaptation_type, COUNT(*) 
-               FROM republished_posts 
-               WHERE channel_id = ? AND adaptation_type IS NOT NULL
-               GROUP BY adaptation_type""",
-            (SOURCE_CHANNEL_ID,)
-        ).fetchall()
     
     button_status = "✅" if BUTTON_URL else "❌"
-    comment_status = "✅ Включены" if COMMENT_ENABLED else "❌ Отключены"
     
-    text = f"📊 *Статус*\n\n"
-    text += f"📝 Обработано: {count}\n"
-    text += f"❌ Ошибок: {failed}\n"
-    text += f"🕐 Последняя: {last or 'Нет'}\n"
-    text += f"🤖 AI: {'✅' if deepseek_client else '❌'}\n"
-    text += f"🔗 Кнопка: {button_status}\n"
-    text += f"💬 Комментарии: {comment_status}\n"
-    text += f"🏷️ Бренд: {BRAND_NAME}\n\n"
-    
-    if adaptation_stats:
-        text += "*Типы адаптации:*\n"
-        type_names = {
-            'original': 'Оригинал',
-            'light_adaptation': 'Легкая редактура',
-            'medium_adaptation': 'Умеренная адаптация',
-            'full_adaptation': 'Полная переработка',
-            'journalistic': 'Журналистский стиль',
-            'full_adaptation_fallback': 'Полная переработка (запасной)'
-        }
-        for atype, count in adaptation_stats:
-            name = type_names.get(atype, atype)
-            text += f"  • {name}: {count}\n"
-    
-    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text(
+        f"📊 *Статус*\n\n"
+        f"📝 Обработано: {count}\n"
+        f"❌ Ошибок: {failed}\n"
+        f"🕐 Последняя: {last or 'Нет'}\n"
+        f"🤖 AI: {'✅' if deepseek_client else '❌'}\n"
+        f"🔗 Кнопка: {button_status}",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with sqlite3.connect(DB_PATH) as conn:
@@ -1097,6 +775,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принудительная проверка новых постов"""
     await update.message.reply_text("🔍 Начинаю проверку новых постов...")
+    await check_and_process(context.bot)
     await update.message.reply_text("✅ Проверка завершена")
 
 # ==================== ЗАПУСК ====================
@@ -1114,13 +793,7 @@ async def run_bot():
     logger.info(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
     logger.info(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
     logger.info(f"🤖 DeepSeek AI: {'✅ Подключен' if deepseek_client else '❌ Не настроен'}")
-    logger.info(f"🏷️ Бренд: {BRAND_NAME}")
     logger.info(f"🔗 Кнопка: {'✅ Настроена' if BUTTON_URL else '❌ Не настроена'}")
-    logger.info(f"💬 Комментарии: {'✅ Включены' if COMMENT_ENABLED else '❌ Отключены'}")
-    if COMMENTS_CHAT_ID:
-        logger.info(f"📌 ID чата комментариев: {COMMENTS_CHAT_ID}")
-    else:
-        logger.info(f"📌 ID чата комментариев: будет определен автоматически")
     if BUTTON_URL:
         logger.info(f"   Ссылка: {BUTTON_URL}")
         logger.info(f"   Текст: {BUTTON_TEXT}")
@@ -1129,7 +802,7 @@ async def run_bot():
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики команд
+    # Добавляем обработчики для channel_post (это ключевой момент!)
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("stats", stats))
@@ -1146,21 +819,12 @@ async def run_bot():
                 logger.info(f"📨 Получен новый пост в канале: {message.message_id}")
                 await process_message(context.bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
     
-    # Добавляем обработчики для сообщений из канала-источника
-    try:
-        source_chat_id = int(SOURCE_CHANNEL_ID)
-        application.add_handler(MessageHandler(
-            filters.Chat(chat_id=source_chat_id) & (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL),
-            channel_post_handler
-        ))
-        logger.info(f"✅ Добавлен обработчик для канала {source_chat_id}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка добавления обработчика: {e}")
+    application.add_handler(MessageHandler(filters.TEXT & filters.Chat(chat_id=int(SOURCE_CHANNEL_ID)), channel_post_handler))
+    # Добавляем обработчик для всех сообщений из канала (включая медиа)
+    application.add_handler(MessageHandler(filters.Chat(chat_id=int(SOURCE_CHANNEL_ID)), channel_post_handler))
     
-    # Запускаем бота
+    # Запускаем
     try:
-        logger.info("🚀 Запускаем бота...")
-        
         await application.initialize()
         await application.start()
         
@@ -1183,44 +847,70 @@ async def run_bot():
             logger.error(f"❌ НЕТ ДОСТУПА К ЦЕЛЕВОМУ КАНАЛУ: {e}")
             logger.error("Проверьте, что бот добавлен как администратор в целевой канал!")
         
-        # Если включены комментарии, проверяем доступ к чату комментариев
-        if COMMENT_ENABLED:
-            try:
-                comments_chat_id = COMMENTS_CHAT_ID or await get_comments_chat_id(application.bot, TARGET_CHANNEL_ID)
-                if comments_chat_id:
-                    comments_chat = await application.bot.get_chat(comments_chat_id)
-                    logger.info(f"✅ Доступ к чату комментариев: {comments_chat.title}")
-                else:
-                    logger.warning("⚠️ Не удалось получить доступ к чату комментариев")
-            except Exception as e:
-                logger.warning(f"⚠️ Нет доступа к чату комментариев: {e}")
-                logger.warning("Бот будет отправлять комментарии как обычные сообщения в канал")
-        
-        # Удаляем webhook с очисткой pending updates
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации: {e}")
+        return
+    
+    # Удаляем webhook (ВАЖНО!)
+    try:
         logger.info("🔄 Удаляем webhook...")
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook удален")
-        
-        # Запускаем polling с правильными параметрами
+    except Exception as e:
+        logger.warning(f"⚠️ Ошибка удаления webhook: {e}")
+    
+    await asyncio.sleep(2)
+    
+    # Запускаем polling
+    try:
         logger.info("🔄 Запускаем polling...")
         await application.updater.start_polling(
-            allowed_updates=["message", "channel_post", "callback_query"],
+            allowed_updates=["message", "channel_post"],
             drop_pending_updates=True,
             poll_interval=1.0,
-            timeout=30,
-            bootstrap_retries=3
+            timeout=30
         )
-        logger.info("✅ Бот успешно запущен и слушает обновления!")
-        
-        # Бесконечное ожидание
-        while True:
-            await asyncio.sleep(60)
-            
+        logger.info("✅ Бот запущен и слушает обновления!")
     except Exception as e:
-        logger.error(f"❌ Ошибка при запуске бота: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+        logger.error(f"⚠️ Ошибка запуска polling: {e}")
+        logger.info("🔄 Пробуем еще раз через 5 секунд...")
+        await asyncio.sleep(5)
+        try:
+            await application.updater.start_polling(
+                allowed_updates=["message", "channel_post"],
+                drop_pending_updates=True,
+                poll_interval=1.0,
+                timeout=30
+            )
+            logger.info("✅ Бот запущен со второй попытки!")
+        except Exception as e2:
+            logger.error(f"❌ Не удалось запустить polling: {e2}")
+            return
+    
+    # Основной цикл проверки новых постов (уже не нужен, но оставим для обратной совместимости)
+    logger.info("⚡ Бот ожидает новые посты в реальном времени...")
+    
+    # Бесконечное ожидание, чтобы бот не завершился
+    while True:
+        try:
+            await asyncio.sleep(60)
+            # Периодически проверяем, не упал ли polling
+            if not application.updater.running:
+                logger.warning("⚠️ Updater остановлен, перезапускаем...")
+                await application.updater.start_polling(
+                    allowed_updates=["message", "channel_post"],
+                    drop_pending_updates=True,
+                    poll_interval=1.0,
+                    timeout=30
+                )
+        except asyncio.CancelledError:
+            logger.info("🔄 Цикл остановлен")
+            break
+        except Exception as e:
+            logger.error(f"❌ Ошибка в цикле: {e}")
+            import traceback
+            traceback.print_exc()
+            await asyncio.sleep(60)
 
 if __name__ == "__main__":
     try:
