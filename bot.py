@@ -207,17 +207,66 @@ def remove_emojis(text: str) -> str:
     )
     return emoji_pattern.sub(r'', text)
 
-def format_caption(title: str, body: str) -> str:
+def truncate_text(text: str, max_length: int = 1000, add_ellipsis: bool = True) -> str:
+    """
+    Обрезает текст до указанной длины, сохраняя целостность слов
+    """
+    if not text:
+        return ""
+    
+    # Удаляем HTML теги для подсчета символов
+    clean_text = re.sub(r'<[^>]+>', '', text)
+    
+    if len(clean_text) <= max_length:
+        return text
+    
+    # Обрезаем по словам
+    words = text.split()
+    result = []
+    current_length = 0
+    
+    for word in words:
+        # Проверяем, поместится ли слово (без HTML тегов)
+        clean_word = re.sub(r'<[^>]+>', '', word)
+        if current_length + len(clean_word) + 1 <= max_length - (3 if add_ellipsis else 0):
+            result.append(word)
+            current_length += len(clean_word) + 1
+        else:
+            break
+    
+    truncated = ' '.join(result)
+    
+    # Добавляем многоточие, если нужно
+    if add_ellipsis and len(truncated) < len(clean_text):
+        # Удаляем последний HTML тег, если он неполный
+        if truncated.endswith('>'):
+            last_space = truncated.rfind(' ')
+            if last_space > 0:
+                truncated = truncated[:last_space]
+        truncated += '...'
+    
+    return truncated
+
+def format_caption(title: str, body: str, max_length: int = 1000) -> str:
+    """
+    Форматирует подпись и обрезает до указанной длины
+    """
     title = remove_emojis(title) if title else ""
     body = remove_emojis(body) if body else ""
     
     if not title and not body:
         return ""
+    
+    # Формируем подпись
     if title and not body:
-        return f"<b>{title}</b>"
-    if not title and body:
-        return body
-    return f"<b>{title}</b>\n\n{body}"
+        caption = f"<b>{title}</b>"
+    elif not title and body:
+        caption = body
+    else:
+        caption = f"<b>{title}</b>\n\n{body}"
+    
+    # Обрезаем до максимальной длины
+    return truncate_text(caption, max_length, add_ellipsis=True)
 
 def wrap_text_auto(text: str, font, max_width: int, max_lines: int = 6) -> List[str]:
     words = text.split()
@@ -662,7 +711,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
             body = text[70:] if len(text) > 70 else text
             adaptation_type = "original"
         
-        caption = format_caption(title, body)
+        # Формируем подпись с ограничением длины
+        caption = format_caption(title, body, max_length=1000)
         has_media = False
         media_type = None
         
@@ -694,16 +744,28 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 logger.info(f"✅ Опубликовано оформленное фото в {target_channel_id}")
             except Exception as e:
                 logger.error(f"⚠️ Ошибка оформления: {e}")
-                await bot.send_photo(
-                    chat_id=target_channel_id,
-                    photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
-                    caption=caption,
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=reply_markup
-                )
-                has_media = True
-                media_type = "photo"
-                logger.info(f"✅ Опубликовано оригинальное фото в {target_channel_id}")
+                # Пробуем отправить без оформления
+                try:
+                    await bot.send_photo(
+                        chat_id=target_channel_id,
+                        photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
+                        caption=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                    has_media = True
+                    media_type = "photo"
+                    logger.info(f"✅ Опубликовано оригинальное фото в {target_channel_id}")
+                except Exception as e2:
+                    logger.error(f"❌ Ошибка отправки фото: {e2}")
+                    # Если и это не работает, отправляем только текст
+                    await bot.send_message(
+                        chat_id=target_channel_id,
+                        text=caption,
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
+                    )
+                    logger.info(f"✅ Опубликован только текст (фото не удалось отправить)")
         
         elif message.video:
             logger.info("🎬 Обрабатываем видео...")
@@ -711,16 +773,27 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
             file = await bot.get_file(video.file_id)
             video_bytes = await file.download_as_bytearray()
             
-            await bot.send_video(
-                chat_id=target_channel_id,
-                video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
-                caption=caption,
-                parse_mode=ParseMode.HTML,
-                reply_markup=reply_markup
-            )
-            has_media = True
-            media_type = "video"
-            logger.info(f"✅ Опубликовано видео в {target_channel_id}")
+            try:
+                await bot.send_video(
+                    chat_id=target_channel_id,
+                    video=InputFile(io.BytesIO(video_bytes), filename="video.mp4"),
+                    caption=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+                has_media = True
+                media_type = "video"
+                logger.info(f"✅ Опубликовано видео в {target_channel_id}")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки видео: {e}")
+                # Отправляем только текст
+                await bot.send_message(
+                    chat_id=target_channel_id,
+                    text=caption,
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
+                )
+                logger.info(f"✅ Опубликован только текст (видео не удалось отправить)")
         
         elif message.document:
             doc = message.document
@@ -743,15 +816,25 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                     logger.info(f"✅ Опубликовано оформленное изображение из документа")
                 except Exception as e:
                     logger.error(f"⚠️ Ошибка оформления документа: {e}")
-                    await bot.send_photo(
-                        chat_id=target_channel_id,
-                        photo=InputFile(io.BytesIO(file_bytes), filename=doc.file_name or "document.jpg"),
-                        caption=caption,
-                        parse_mode=ParseMode.HTML,
-                        reply_markup=reply_markup
-                    )
-                    has_media = True
-                    media_type = "document_image"
+                    try:
+                        await bot.send_photo(
+                            chat_id=target_channel_id,
+                            photo=InputFile(io.BytesIO(file_bytes), filename=doc.file_name or "document.jpg"),
+                            caption=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup
+                        )
+                        has_media = True
+                        media_type = "document_image"
+                        logger.info(f"✅ Опубликовано оригинальное изображение из документа")
+                    except Exception as e2:
+                        logger.error(f"❌ Ошибка отправки документа: {e2}")
+                        await bot.send_message(
+                            chat_id=target_channel_id,
+                            text=caption,
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=reply_markup
+                        )
             else:
                 logger.info("📝 Отправляем только текст (документ не изображение)")
                 await bot.send_message(
@@ -770,7 +853,7 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 reply_markup=reply_markup
             )
         
-        # Сохраняем в БД (адаптированный текст)
+        # Сохраняем в БД
         adapted_text = f"{title}\n\n{body}" if title and body else text
         save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type, adaptation_type)
         save_processed_message(message_id, source_channel_id)
@@ -826,7 +909,6 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (SOURCE_CHANNEL_ID,)
         ).fetchone()[0]
         
-        # Статистика по типам адаптации
         adaptation_stats = conn.execute(
             """SELECT adaptation_type, COUNT(*) 
                FROM republished_posts 
@@ -885,7 +967,6 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принудительная проверка новых постов"""
     await update.message.reply_text("🔍 Начинаю проверку новых постов...")
-    # Здесь можно добавить логику принудительной проверки
     await update.message.reply_text("✅ Проверка завершена")
 
 # ==================== ЗАПУСК ====================
@@ -945,7 +1026,6 @@ async def run_bot():
     try:
         logger.info("🚀 Запускаем бота...")
         
-        # Удаляем webhook и запускаем polling с правильными параметрами
         await application.initialize()
         await application.start()
         
