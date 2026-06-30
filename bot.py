@@ -46,6 +46,7 @@ COMMENT_TEXT = os.getenv("COMMENT_TEXT",
     "📱 А если Вам есть чем поделиться, пишите в наш бот: @fiderby_bot"
 )
 COMMENT_DELAY = int(os.getenv("COMMENT_DELAY", "2"))
+COMMENTS_CHAT_ID = os.getenv("COMMENTS_CHAT_ID", "")  # ID чата комментариев
 
 # ==================== ПРОВЕРКА НАСТРОЕК ====================
 if not BOT_TOKEN:
@@ -73,6 +74,10 @@ else:
 
 if COMMENT_ENABLED:
     logger.info(f"💬 Комментарии включены")
+    if COMMENTS_CHAT_ID:
+        logger.info(f"📌 ID чата комментариев: {COMMENTS_CHAT_ID}")
+    else:
+        logger.info(f"📌 ID чата комментариев не задан, будет определен автоматически")
     logger.info(f"📝 Текст комментария: {COMMENT_TEXT[:50]}...")
     logger.info(f"⏱️ Задержка перед комментарием: {COMMENT_DELAY} сек")
 else:
@@ -696,9 +701,30 @@ def get_post_publish_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 # ==================== ФУНКЦИЯ ДЛЯ КОММЕНТАРИЯ ====================
+async def get_comments_chat_id(bot: Bot, channel_id: str) -> Optional[str]:
+    """
+    Получает ID чата комментариев для канала
+    """
+    try:
+        # Получаем информацию о канале
+        chat = await bot.get_chat(channel_id)
+        
+        # Если у канала есть связанный чат для комментариев
+        if hasattr(chat, 'linked_chat_id') and chat.linked_chat_id:
+            comments_chat_id = chat.linked_chat_id
+            logger.info(f"✅ Найден чат комментариев: {comments_chat_id}")
+            return str(comments_chat_id)
+        else:
+            logger.warning("⚠️ У канала нет отдельного чата для комментариев")
+            return None
+    except Exception as e:
+        logger.error(f"❌ Ошибка получения чата комментариев: {e}")
+        return None
+
 async def send_comment_after_post(bot: Bot, channel_id: str, message_id: int):
     """
     Отправляет комментарий после публикации поста
+    Комментарий отправляется в чат комментариев (связанный с каналом)
     """
     if not COMMENT_ENABLED:
         logger.info("ℹ️ Отправка комментариев отключена в настройках")
@@ -709,18 +735,51 @@ async def send_comment_after_post(bot: Bot, channel_id: str, message_id: int):
         if COMMENT_DELAY > 0:
             await asyncio.sleep(COMMENT_DELAY)
         
-        # Отправляем комментарий как ответ на опубликованный пост
-        await bot.send_message(
-            chat_id=channel_id,
-            text=COMMENT_TEXT,
-            reply_to_message_id=message_id,
-            parse_mode=ParseMode.HTML
-        )
-        logger.info(f"✅ Комментарий отправлен к посту {message_id}")
-        return True
+        # Определяем ID чата для комментариев
+        comments_chat = None
+        
+        # Если задан явно в настройках
+        if COMMENTS_CHAT_ID:
+            comments_chat = COMMENTS_CHAT_ID
+            logger.info(f"📌 Используем ID чата комментариев из настроек: {comments_chat}")
+        else:
+            # Пробуем получить автоматически
+            comments_chat = await get_comments_chat_id(bot, channel_id)
+        
+        # Если чат комментариев найден, отправляем туда
+        if comments_chat:
+            await bot.send_message(
+                chat_id=comments_chat,
+                text=COMMENT_TEXT,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info(f"✅ Комментарий отправлен в чат комментариев {comments_chat}")
+            return True
+        else:
+            # Если чат комментариев не найден, пробуем отправить в канал
+            logger.warning("⚠️ Чат комментариев не найден, отправляем в канал")
+            await bot.send_message(
+                chat_id=channel_id,
+                text=COMMENT_TEXT,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info(f"✅ Комментарий отправлен в канал (как обычное сообщение)")
+            return True
+            
     except Exception as e:
-        logger.error(f"❌ Ошибка отправки комментария к посту {message_id}: {e}")
-        return False
+        logger.error(f"❌ Ошибка отправки комментария: {e}")
+        # Пробуем отправить в основной канал как обычное сообщение
+        try:
+            await bot.send_message(
+                chat_id=channel_id,
+                text=COMMENT_TEXT,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info(f"✅ Комментарий отправлен в канал (как обычное сообщение)")
+            return True
+        except Exception as e2:
+            logger.error(f"❌ Ошибка отправки комментария в канал: {e2}")
+            return False
 
 # ==================== ОБРАБОТКА СООБЩЕНИЙ ====================
 async def process_message(bot: Bot, message, source_channel_id: str, target_channel_id: str):
@@ -1058,6 +1117,10 @@ async def run_bot():
     logger.info(f"🏷️ Бренд: {BRAND_NAME}")
     logger.info(f"🔗 Кнопка: {'✅ Настроена' if BUTTON_URL else '❌ Не настроена'}")
     logger.info(f"💬 Комментарии: {'✅ Включены' if COMMENT_ENABLED else '❌ Отключены'}")
+    if COMMENTS_CHAT_ID:
+        logger.info(f"📌 ID чата комментариев: {COMMENTS_CHAT_ID}")
+    else:
+        logger.info(f"📌 ID чата комментариев: будет определен автоматически")
     if BUTTON_URL:
         logger.info(f"   Ссылка: {BUTTON_URL}")
         logger.info(f"   Текст: {BUTTON_TEXT}")
@@ -1119,6 +1182,19 @@ async def run_bot():
         except Exception as e:
             logger.error(f"❌ НЕТ ДОСТУПА К ЦЕЛЕВОМУ КАНАЛУ: {e}")
             logger.error("Проверьте, что бот добавлен как администратор в целевой канал!")
+        
+        # Если включены комментарии, проверяем доступ к чату комментариев
+        if COMMENT_ENABLED:
+            try:
+                comments_chat_id = COMMENTS_CHAT_ID or await get_comments_chat_id(application.bot, TARGET_CHANNEL_ID)
+                if comments_chat_id:
+                    comments_chat = await application.bot.get_chat(comments_chat_id)
+                    logger.info(f"✅ Доступ к чату комментариев: {comments_chat.title}")
+                else:
+                    logger.warning("⚠️ Не удалось получить доступ к чату комментариев")
+            except Exception as e:
+                logger.warning(f"⚠️ Нет доступа к чату комментариев: {e}")
+                logger.warning("Бот будет отправлять комментарии как обычные сообщения в канал")
         
         # Удаляем webhook с очисткой pending updates
         logger.info("🔄 Удаляем webhook...")
