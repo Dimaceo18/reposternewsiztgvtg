@@ -32,9 +32,12 @@ DB_PATH = "republished.db"
 FONT_PATH = os.getenv("FONT_PATH", "Montserrat-Black.ttf")
 
 # ==================== НАСТРОЙКИ ДЛЯ КНОПКИ ====================
-# Ссылка для кнопки (можно указать полную ссылку или имя канала)
-BUTTON_URL = os.getenv("BUTTON_URL", "")  # Например: "https://t.me/mychannel" или "@mychannel"
-BUTTON_TEXT = os.getenv("BUTTON_TEXT", "📢 Подписаться на канал")  # Текст кнопки
+BUTTON_URL = os.getenv("BUTTON_URL", "")
+BUTTON_TEXT = os.getenv("BUTTON_TEXT", "📢 Подписаться на канал")
+
+# ==================== НАСТРОЙКИ БРЕНДИРОВАНИЯ ====================
+BRAND_NAME = os.getenv("BRAND_NAME", "Fider.by")
+BRAND_TEAM = os.getenv("BRAND_TEAM", f"Команда {BRAND_NAME}")
 
 # ==================== ПРОВЕРКА НАСТРОЕК ====================
 if not BOT_TOKEN:
@@ -52,8 +55,8 @@ if not TARGET_CHANNEL_ID:
 logger.info(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
 logger.info(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
 logger.info(f"🤖 DeepSeek AI: {'✅ Подключен' if DEEPSEEK_API_KEY else '❌ Не настроен'}")
+logger.info(f"🏷️ Бренд: {BRAND_NAME}")
 
-# Логируем настройки кнопки
 if BUTTON_URL:
     logger.info(f"🔗 Ссылка для кнопки: {BUTTON_URL}")
     logger.info(f"📝 Текст кнопки: {BUTTON_TEXT}")
@@ -104,7 +107,8 @@ def init_db():
                     original_text TEXT,
                     adapted_text TEXT,
                     has_media BOOLEAN DEFAULT 0,
-                    media_type TEXT
+                    media_type TEXT,
+                    adaptation_type TEXT
                 )
             """)
             conn.execute("""
@@ -150,14 +154,14 @@ def save_processed_message(message_id: int, channel_id: str):
     except Exception as e:
         logger.error(f"Ошибка сохранения обработанного сообщения: {e}")
 
-def save_republished(message_id: int, channel_id: str, title: str, original_text: str, adapted_text: str, has_media: bool = False, media_type: str = None):
+def save_republished(message_id: int, channel_id: str, title: str, original_text: str, adapted_text: str, has_media: bool = False, media_type: str = None, adaptation_type: str = None):
     try:
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
                 """INSERT OR REPLACE INTO republished_posts 
-                   (message_id, channel_id, title, republished_at, original_text, adapted_text, has_media, media_type)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (message_id, channel_id, title, datetime.now(), original_text, adapted_text, has_media, media_type)
+                   (message_id, channel_id, title, republished_at, original_text, adapted_text, has_media, media_type, adaptation_type)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (message_id, channel_id, title, datetime.now(), original_text, adapted_text, has_media, media_type, adaptation_type)
             )
     except Exception as e:
         logger.error(f"Ошибка сохранения републикации: {e}")
@@ -361,7 +365,7 @@ async def call_deepseek_with_retry(prompt: str, text: str, max_attempts: int = 2
                 model="deepseek-chat",
                 messages=[
                     {"role": "system", "content": current_prompt},
-                    {"role": "user", "content": f"Перепиши эту новость в новостном формате на 600-650 символов. Сохрани ВСЕ важные факты, цифры, даты, имена. НЕ ОБРЕЗАЙ текст, а ПЕРЕПИШИ его, сохраняя смысл. НЕ пиши слова ЗАГОЛОВОК и ТЕКСТ. Просто напиши сначала заголовок, потом пустую строку, потом текст.\n\n{current_text}"}
+                    {"role": "user", "content": f"Перепиши этот текст:\n\n{current_text}"}
                 ],
                 temperature=0.7,
                 max_tokens=1000
@@ -375,22 +379,13 @@ async def call_deepseek_with_retry(prompt: str, text: str, max_attempts: int = 2
         try:
             content = await make_request(prompt, text)
             
-            if not content or len(content.strip()) < 50:
+            if not content or len(content.strip()) < 20:
                 logger.warning(f"Попытка {attempt + 1}: Получен пустой или слишком короткий ответ")
                 if attempt == max_attempts - 1:
-                    return content
+                    return ""
                 continue
             
-            char_count = len(content)
-            logger.info(f"Попытка {attempt + 1}: Получен текст длиной {char_count} символов")
-            
-            if 550 <= char_count <= 700 or attempt == max_attempts - 1:
-                return content
-            
-            if char_count < 550:
-                text = f"СДЕЛАЙ ТЕКСТ ДЛИННЕЕ (сейчас {char_count} символов, нужно 600-650). Добавь больше деталей, фактов, цифр. Вот исходный текст:\n\n{text}"
-            else:
-                text = f"СДЕЛАЙ ТЕКСТ КОРОЧЕ (сейчас {char_count} символов, нужно 600-650). Убери лишние слова, но сохрани все важные факты. Вот исходный текст:\n\n{text}"
+            return content
                 
         except Exception as e:
             logger.error(f"Ошибка при попытке {attempt + 1}: {e}")
@@ -449,19 +444,184 @@ def parse_ai_response(content: str) -> Tuple[str, str]:
     
     return title, body
 
+async def adapt_text_by_length(text: str) -> Tuple[str, str, str]:
+    """
+    Адаптирует текст в зависимости от его длины:
+    - Короткие тексты (до 200 символов): небольшая адаптация
+    - Средние тексты (200-300 символов): умеренная адаптация
+    - Длинные тексты (300-500 символов): полная переработка в новостном формате
+    - Очень длинные тексты (500+ символов): журналистский стиль с брендированием
+    
+    Возвращает: (заголовок, тело, тип_адаптации)
+    """
+    if not text:
+        return "", "", "original"
+    
+    text_length = len(text)
+    logger.info(f"📊 Длина текста: {text_length} символов")
+    
+    # Если AI не настроен, используем оригинальный текст
+    if not deepseek_client:
+        logger.info("ℹ️ AI не настроен, используем оригинальный текст")
+        title = text[:70].strip()
+        body = text[70:] if len(text) > 70 else text
+        return title, body, "original"
+    
+    try:
+        # Короткий текст (до 200 символов) - легкая адаптация
+        if text_length <= 200:
+            logger.info("📝 Короткий текст (≤200 символов) - применяем легкую адаптацию")
+            
+            short_prompt = """Адаптируй этот короткий текст для публикации в новостном канале. 
+Сделай текст более читаемым, убери смайлики и лишние символы, но сохрани все факты. 
+НЕ переписывай полностью, а лишь слегка отредактируй.
+Если текст уже хороший, можешь оставить его как есть.
+
+Важно:
+- Сохрани все факты, цифры, имена
+- Удали смайлики и эмодзи
+- Сделай текст грамотным и читаемым
+- НЕ добавляй новые факты
+- НЕ увеличивай объем текста более чем на 20%
+
+Ответ должен быть в формате:
+Короткий заголовок (если есть)
+Пустая строка
+Основной текст"""
+
+            response = await call_deepseek_with_retry(short_prompt, text, max_attempts=1)
+            
+            if response and len(response.strip()) > 20:
+                if len(response) <= text_length * 1.3:
+                    logger.info(f"✅ Легкая адаптация выполнена (было {text_length}, стало {len(response)})")
+                    title, body = parse_ai_response(response)
+                    return title, body, "light_adaptation"
+                else:
+                    logger.warning(f"⚠️ Ответ AI слишком длинный ({len(response)} > {text_length * 1.3}), используем оригинал")
+            
+            title = text[:70].strip()
+            body = text[70:] if len(text) > 70 else text
+            return title, body, "original"
+        
+        # Средний текст (200-300 символов) - умеренная адаптация
+        elif 200 < text_length <= 300:
+            logger.info("📝 Средний текст (200-300 символов) - применяем умеренную адаптацию")
+            
+            medium_prompt = """Адаптируй этот текст для новостного канала. 
+Сделай текст более структурированным и читаемым.
+Удали смайлики, рекламу и кликбейт.
+
+Правила:
+- Сохрани все важные факты, цифры, даты, имена
+- Сделай текст грамотным и структурированным
+- Разбей на абзацы, если это уместно
+- Удали смайлики и эмодзи
+- Можно немного расширить текст, добавляя связки и пояснения
+- Итоговый текст должен быть примерно на 10-20% длиннее оригинала
+
+Ответ должен быть в формате:
+Заголовок (краткий и информативный)
+Пустая строка
+Основной текст (без маркеров "Заголовок:" и "Текст:")"""
+
+            response = await call_deepseek_with_retry(medium_prompt, text, max_attempts=2)
+            
+            if response and len(response.strip()) > 50:
+                if len(response) <= text_length * 1.5:
+                    logger.info(f"✅ Умеренная адаптация выполнена (было {text_length}, стало {len(response)})")
+                    title, body = parse_ai_response(response)
+                    return title, body, "medium_adaptation"
+                else:
+                    logger.warning(f"⚠️ Ответ AI слишком длинный ({len(response)} > {text_length * 1.5})")
+            
+            title = text[:70].strip()
+            body = text[70:] if len(text) > 70 else text
+            return title, body, "original"
+        
+        # Длинный текст (300-500 символов) - полная переработка
+        elif 300 < text_length <= 500:
+            logger.info("📝 Длинный текст (300-500 символов) - применяем полную переработку")
+            
+            response = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text, max_attempts=2)
+            
+            if response and len(response.strip()) > 100:
+                logger.info(f"✅ Полная переработка выполнена (было {text_length}, стало {len(response)})")
+                title, body = parse_ai_response(response)
+                return title, body, "full_adaptation"
+            else:
+                logger.warning("⚠️ Полная переработка не удалась, используем оригинал")
+                title = text[:70].strip()
+                body = text[70:] if len(text) > 70 else text
+                return title, body, "original"
+        
+        # Очень длинный текст (500+ символов) - журналистский стиль с брендированием
+        else:
+            logger.info("📝 Очень длинный текст (500+ символов) - применяем журналистский стиль с брендированием")
+            
+            journalistic_prompt = f"""Перепиши эту новость в профессиональном журналистском стиле с элементами брендирования.
+
+Важно использовать следующие фразы (НЕ ВСЕ СРАЗУ, а распределяя по тексту):
+- "Как стало известно редакции {BRAND_NAME}"
+- "{BRAND_TEAM} сообщает"
+- "Передает журналист {BRAND_NAME}"
+- "Как сообщают подписчики {BRAND_NAME}"
+- "По информации {BRAND_NAME}"
+- "Источник в {BRAND_NAME} уточняет"
+
+Правила:
+- Сохрани ВСЕ важные факты, цифры, даты, имена, места
+- Используй 2-3 журналистские фразы с упоминанием {BRAND_NAME} (НЕ больше, чтобы не было навязчиво)
+- Пиши в нейтральном, информационном стиле
+- Разбей на 3-4 абзаца (пустая строка между абзацами)
+- Удали смайлики, рекламу, кликбейт, личные оценки
+- Сделай заголовок ярким и информативным
+- Объем: 600-700 символов
+- Добавь в текст элементы интриги, но без перегибов
+
+ВАЖНО: НЕ пиши слова "Заголовок:" и "Текст:". Просто напиши сначала заголовок, потом пустую строку, потом текст.
+
+Пример правильного ответа:
+Новый парк открыли в Гродно
+
+Как стало известно редакции {BRAND_NAME}, в центре Гродно состоялось торжественное открытие нового парка культуры и отдыха. На мероприятии присутствовали городские власти и местные жители.
+
+{BRAND_TEAM} сообщает, что парк занимает площадь 5 гектаров. Здесь установлены современные скамейки, фонари и детская площадка.
+
+По информации {BRAND_NAME}, полностью завершить благоустройство планируют к концу года. Жители города уже активно посещают новое общественное пространство."""
+
+            response = await call_deepseek_with_retry(journalistic_prompt, text, max_attempts=2)
+            
+            if response and len(response.strip()) > 150:
+                logger.info(f"✅ Журналистский стиль применен (было {text_length}, стало {len(response)})")
+                title, body = parse_ai_response(response)
+                return title, body, "journalistic"
+            else:
+                logger.warning("⚠️ Журналистский стиль не удался, пробуем стандартную переработку")
+                # Пробуем стандартную переработку как запасной вариант
+                response = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text, max_attempts=1)
+                if response and len(response.strip()) > 100:
+                    title, body = parse_ai_response(response)
+                    return title, body, "full_adaptation_fallback"
+                else:
+                    title = text[:70].strip()
+                    body = text[70:] if len(text) > 70 else text
+                    return title, body, "original"
+                
+    except Exception as e:
+        logger.error(f"❌ Ошибка адаптации текста: {e}")
+        title = text[:70].strip()
+        body = text[70:] if len(text) > 70 else text
+        return title, body, "original"
+
 def get_post_publish_keyboard():
     """Создает клавиатуру с кнопкой для подписки"""
-    # Если BUTTON_URL не задан, возвращаем None (без кнопки)
     if not BUTTON_URL:
         return None
     
-    # Обрабатываем ссылку
     url = BUTTON_URL.strip()
     
-    # Если ссылка начинается с @, преобразуем в полную ссылку
     if url.startswith('@'):
         url = f"https://t.me/{url[1:]}"
-    # Если ссылка не начинается с http, добавляем https://t.me/
     elif not url.startswith('http'):
         url = f"https://t.me/{url}"
     
@@ -494,23 +654,14 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
         logger.info(f"📄 Длина текста: {len(text)} символов")
         logger.info(f"📄 Текст: {text[:200]}...")
         
-        # Адаптируем текст через AI
-        if deepseek_client:
-            logger.info("🤖 Запрашиваем адаптацию текста через AI...")
-            adapted_text = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text)
-            if adapted_text and len(adapted_text.strip()) > 50:
-                title, body = parse_ai_response(adapted_text)
-                logger.info(f"✅ Текст адаптирован через AI. Заголовок: {title[:50]}...")
-            else:
-                logger.warning("⚠️ AI не дал качественный ответ, используем оригинальный текст")
-                title = text[:70].strip()
-                body = text[70:] if len(text) > 70 else text
-                adapted_text = text
-        else:
-            logger.info("ℹ️ AI не настроен, используем оригинальный текст")
+        # Адаптируем текст в зависимости от длины
+        title, body, adaptation_type = await adapt_text_by_length(text)
+        
+        # Если адаптация не дала результата, используем оригинал
+        if not title and not body:
             title = text[:70].strip()
             body = text[70:] if len(text) > 70 else text
-            adapted_text = text
+            adaptation_type = "original"
         
         caption = format_caption(title, body)
         has_media = False
@@ -548,7 +699,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                     chat_id=target_channel_id,
                     photo=InputFile(io.BytesIO(photo_bytes), filename="post.jpg"),
                     caption=caption,
-                    parse_mode=ParseMode.HTML
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
                 )
                 has_media = True
                 media_type = "photo"
@@ -596,7 +748,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                         chat_id=target_channel_id,
                         photo=InputFile(io.BytesIO(file_bytes), filename=doc.file_name or "document.jpg"),
                         caption=caption,
-                        parse_mode=ParseMode.HTML
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=reply_markup
                     )
                     has_media = True
                     media_type = "document_image"
@@ -605,7 +758,8 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 await bot.send_message(
                     chat_id=target_channel_id,
                     text=caption,
-                    parse_mode=ParseMode.HTML
+                    parse_mode=ParseMode.HTML,
+                    reply_markup=reply_markup
                 )
         
         else:
@@ -617,10 +771,11 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
                 reply_markup=reply_markup
             )
         
-        # Сохраняем в БД
-        save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type)
+        # Сохраняем в БД (адаптированный текст)
+        adapted_text = f"{title}\n\n{body}" if title and body else text
+        save_republished(message_id, source_channel_id, title, text, adapted_text, has_media, media_type, adaptation_type)
         save_processed_message(message_id, source_channel_id)
-        logger.info(f"✅ Сообщение {message_id} успешно обработано и сохранено")
+        logger.info(f"✅ Сообщение {message_id} успешно обработано (тип: {adaptation_type}) и сохранено")
         
     except Exception as e:
         logger.error(f"❌ Ошибка обработки сообщения {message_id}: {e}")
@@ -649,50 +804,25 @@ async def check_and_process(bot: Bot):
         
         try:
             # Используем get_updates для получения новых сообщений
-            # Получаем последние 10 сообщений через API
-            new_messages = []
+            messages = []
+            async for update in bot.get_updates(limit=10):
+                if update.channel_post:
+                    messages.append(update.channel_post)
             
-            # Пробуем получить сообщения через метод get_chat
-            # В новой версии используется get_updates или бот должен слушать обновления
-            # Альтернативный способ - использовать forward или просто получать через get_updates
-            
-            # Так как мы в polling режиме, новые сообщения приходят через обновления
-            # Мы не можем просто так получить историю канала через bot.get_chat_history
-            # Вместо этого мы полагаемся на обработку обновлений
-            
-            # Проверяем, есть ли новые сообщения через альтернативный метод
-            # Для каналов нужно использовать метод get_chat_history, но его нет
-            # Используем другой подход - получаем сообщения через forward или через API
-            
-            logger.info("ℹ️ Для получения сообщений из канала используется механизм обновлений")
-            logger.info("ℹ️ Новые посты будут обрабатываться автоматически при их появлении")
-            
-            # Проверяем, не обработано ли последнее сообщение
-            try:
-                # Пробуем получить последнее сообщение через другой метод
-                # Это не идеально, но работает для каналов
-                messages = []
-                async for update in bot.get_updates(limit=10):
-                    if update.channel_post:
-                        messages.append(update.channel_post)
-                
-                if messages:
-                    logger.info(f"🆕 Найдено {len(messages)} новых сообщений через get_updates")
-                    for message in messages:
-                        if message.chat_id == int(SOURCE_CHANNEL_ID):
-                            if not last_id or message.message_id > last_id:
-                                if not is_message_processed(message.message_id, SOURCE_CHANNEL_ID):
-                                    logger.info(f"  - Новое сообщение {message.message_id}: {message.text[:50] if message.text else '[без текста]'}...")
-                                    await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
-                                    await asyncio.sleep(0.5)
-                else:
-                    logger.info("ℹ️ Новых сообщений в обновлениях нет")
-                    
-            except Exception as e:
-                logger.error(f"⚠️ Ошибка получения обновлений: {e}")
+            if messages:
+                logger.info(f"🆕 Найдено {len(messages)} новых сообщений через get_updates")
+                for message in messages:
+                    if message.chat_id == int(SOURCE_CHANNEL_ID):
+                        if not last_id or message.message_id > last_id:
+                            if not is_message_processed(message.message_id, SOURCE_CHANNEL_ID):
+                                logger.info(f"  - Новое сообщение {message.message_id}: {message.text[:50] if message.text else '[без текста]'}...")
+                                await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
+                                await asyncio.sleep(0.5)
+            else:
+                logger.info("ℹ️ Новых сообщений в обновлениях нет")
                 
         except Exception as e:
-            logger.error(f"⚠️ Ошибка получения истории: {e}")
+            logger.error(f"⚠️ Ошибка получения обновлений: {e}")
             import traceback
             traceback.print_exc()
             
@@ -703,7 +833,6 @@ async def check_and_process(bot: Bot):
 
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Проверяем настройки кнопки
     button_status = "✅ Настроена" if BUTTON_URL else "❌ Не настроена"
     
     await update.message.reply_text(
@@ -712,8 +841,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📥 *Источник:* {SOURCE_CHANNEL_ID}\n"
         f"📤 *Целевой канал:* {TARGET_CHANNEL_ID}\n"
         f"🤖 *DeepSeek AI:* {'✅ Подключен' if deepseek_client else '❌ Не настроен'}\n"
+        f"🏷️ *Бренд:* {BRAND_NAME}\n"
         f"🔗 *Кнопка:* {button_status}\n"
         f"📝 *Текст кнопки:* {BUTTON_TEXT if BUTTON_URL else '—'}\n\n"
+        "📊 *Типы адаптации:*\n"
+        "• ≤200 символов: легкая редактура\n"
+        "• 200-300 символов: умеренная адаптация\n"
+        "• 300-500 символов: полная переработка\n"
+        "• 500+ символов: журналистский стиль\n\n"
         "Команды:\n"
         "/start - Это сообщение\n"
         "/status - Статус\n"
@@ -738,18 +873,41 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT MAX(republished_at) FROM republished_posts WHERE channel_id = ?",
             (SOURCE_CHANNEL_ID,)
         ).fetchone()[0]
+        
+        # Статистика по типам адаптации
+        adaptation_stats = conn.execute(
+            """SELECT adaptation_type, COUNT(*) 
+               FROM republished_posts 
+               WHERE channel_id = ? AND adaptation_type IS NOT NULL
+               GROUP BY adaptation_type""",
+            (SOURCE_CHANNEL_ID,)
+        ).fetchall()
     
     button_status = "✅" if BUTTON_URL else "❌"
     
-    await update.message.reply_text(
-        f"📊 *Статус*\n\n"
-        f"📝 Обработано: {count}\n"
-        f"❌ Ошибок: {failed}\n"
-        f"🕐 Последняя: {last or 'Нет'}\n"
-        f"🤖 AI: {'✅' if deepseek_client else '❌'}\n"
-        f"🔗 Кнопка: {button_status}",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    text = f"📊 *Статус*\n\n"
+    text += f"📝 Обработано: {count}\n"
+    text += f"❌ Ошибок: {failed}\n"
+    text += f"🕐 Последняя: {last or 'Нет'}\n"
+    text += f"🤖 AI: {'✅' if deepseek_client else '❌'}\n"
+    text += f"🔗 Кнопка: {button_status}\n"
+    text += f"🏷️ Бренд: {BRAND_NAME}\n\n"
+    
+    if adaptation_stats:
+        text += "*Типы адаптации:*\n"
+        type_names = {
+            'original': 'Оригинал',
+            'light_adaptation': 'Легкая редактура',
+            'medium_adaptation': 'Умеренная адаптация',
+            'full_adaptation': 'Полная переработка',
+            'journalistic': 'Журналистский стиль',
+            'full_adaptation_fallback': 'Полная переработка (запасной)'
+        }
+        for atype, count in adaptation_stats:
+            name = type_names.get(atype, atype)
+            text += f"  • {name}: {count}\n"
+    
+    await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
 
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     with sqlite3.connect(DB_PATH) as conn:
@@ -793,6 +951,7 @@ async def run_bot():
     logger.info(f"📥 Канал-источник: {SOURCE_CHANNEL_ID}")
     logger.info(f"📤 Целевой канал: {TARGET_CHANNEL_ID}")
     logger.info(f"🤖 DeepSeek AI: {'✅ Подключен' if deepseek_client else '❌ Не настроен'}")
+    logger.info(f"🏷️ Бренд: {BRAND_NAME}")
     logger.info(f"🔗 Кнопка: {'✅ Настроена' if BUTTON_URL else '❌ Не настроена'}")
     if BUTTON_URL:
         logger.info(f"   Ссылка: {BUTTON_URL}")
