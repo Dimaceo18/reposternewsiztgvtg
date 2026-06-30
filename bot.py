@@ -597,7 +597,6 @@ async def adapt_text_by_length(text: str) -> Tuple[str, str, str]:
                 return title, body, "journalistic"
             else:
                 logger.warning("⚠️ Журналистский стиль не удался, пробуем стандартную переработку")
-                # Пробуем стандартную переработку как запасной вариант
                 response = await call_deepseek_with_retry(DEEPSEEK_PROMPT, text, max_attempts=1)
                 if response and len(response.strip()) > 100:
                     title, body = parse_ai_response(response)
@@ -784,53 +783,6 @@ async def process_message(bot: Bot, message, source_channel_id: str, target_chan
         save_failed(message_id, source_channel_id, str(e))
         save_processed_message(message_id, source_channel_id)
 
-# ==================== ОСНОВНАЯ ФУНКЦИЯ ====================
-async def check_and_process(bot: Bot):
-    """Проверяет новые посты в канале"""
-    try:
-        logger.info("🔍 Начинаем проверку канала...")
-        
-        # Проверяем доступ к каналу
-        try:
-            chat = await bot.get_chat(SOURCE_CHANNEL_ID)
-            logger.info(f"✅ Доступ к каналу: {chat.title} (ID: {chat.id})")
-        except Exception as e:
-            logger.error(f"❌ Нет доступа к каналу {SOURCE_CHANNEL_ID}: {e}")
-            return
-        
-        # Получаем последние сообщения используя правильный метод
-        last_id = get_last_processed_message(SOURCE_CHANNEL_ID)
-        logger.info(f"📊 Последний обработанный ID: {last_id}")
-        
-        try:
-            # Используем get_updates для получения новых сообщений
-            messages = []
-            async for update in bot.get_updates(limit=10):
-                if update.channel_post:
-                    messages.append(update.channel_post)
-            
-            if messages:
-                logger.info(f"🆕 Найдено {len(messages)} новых сообщений через get_updates")
-                for message in messages:
-                    if message.chat_id == int(SOURCE_CHANNEL_ID):
-                        if not last_id or message.message_id > last_id:
-                            if not is_message_processed(message.message_id, SOURCE_CHANNEL_ID):
-                                logger.info(f"  - Новое сообщение {message.message_id}: {message.text[:50] if message.text else '[без текста]'}...")
-                                await process_message(bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
-                                await asyncio.sleep(0.5)
-            else:
-                logger.info("ℹ️ Новых сообщений в обновлениях нет")
-                
-        except Exception as e:
-            logger.error(f"⚠️ Ошибка получения обновлений: {e}")
-            import traceback
-            traceback.print_exc()
-            
-    except Exception as e:
-        logger.error(f"❌ Ошибка проверки: {e}")
-        import traceback
-        traceback.print_exc()
-
 # ==================== КОМАНДЫ ====================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     button_status = "✅ Настроена" if BUTTON_URL else "❌ Не настроена"
@@ -933,7 +885,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def check_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Принудительная проверка новых постов"""
     await update.message.reply_text("🔍 Начинаю проверку новых постов...")
-    await check_and_process(context.bot)
+    # Здесь можно добавить логику принудительной проверки
     await update.message.reply_text("✅ Проверка завершена")
 
 # ==================== ЗАПУСК ====================
@@ -961,7 +913,7 @@ async def run_bot():
     # Создаем приложение
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавляем обработчики для channel_post (это ключевой момент!)
+    # Добавляем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("status", status))
     application.add_handler(CommandHandler("stats", stats))
@@ -978,12 +930,22 @@ async def run_bot():
                 logger.info(f"📨 Получен новый пост в канале: {message.message_id}")
                 await process_message(context.bot, message, SOURCE_CHANNEL_ID, TARGET_CHANNEL_ID)
     
-    application.add_handler(MessageHandler(filters.TEXT & filters.Chat(chat_id=int(SOURCE_CHANNEL_ID)), channel_post_handler))
-    # Добавляем обработчик для всех сообщений из канала (включая медиа)
-    application.add_handler(MessageHandler(filters.Chat(chat_id=int(SOURCE_CHANNEL_ID)), channel_post_handler))
-    
-    # Запускаем
+    # Добавляем обработчики для сообщений из канала-источника
     try:
+        source_chat_id = int(SOURCE_CHANNEL_ID)
+        application.add_handler(MessageHandler(
+            filters.Chat(chat_id=source_chat_id) & (filters.TEXT | filters.PHOTO | filters.VIDEO | filters.Document.ALL),
+            channel_post_handler
+        ))
+        logger.info(f"✅ Добавлен обработчик для канала {source_chat_id}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка добавления обработчика: {e}")
+    
+    # Запускаем бота
+    try:
+        logger.info("🚀 Запускаем бота...")
+        
+        # Удаляем webhook и запускаем polling с правильными параметрами
         await application.initialize()
         await application.start()
         
@@ -1006,70 +968,31 @@ async def run_bot():
             logger.error(f"❌ НЕТ ДОСТУПА К ЦЕЛЕВОМУ КАНАЛУ: {e}")
             logger.error("Проверьте, что бот добавлен как администратор в целевой канал!")
         
-    except Exception as e:
-        logger.error(f"❌ Ошибка инициализации: {e}")
-        return
-    
-    # Удаляем webhook (ВАЖНО!)
-    try:
+        # Удаляем webhook с очисткой pending updates
         logger.info("🔄 Удаляем webhook...")
         await application.bot.delete_webhook(drop_pending_updates=True)
         logger.info("✅ Webhook удален")
-    except Exception as e:
-        logger.warning(f"⚠️ Ошибка удаления webhook: {e}")
-    
-    await asyncio.sleep(2)
-    
-    # Запускаем polling
-    try:
+        
+        # Запускаем polling с правильными параметрами
         logger.info("🔄 Запускаем polling...")
         await application.updater.start_polling(
-            allowed_updates=["message", "channel_post"],
+            allowed_updates=["message", "channel_post", "callback_query"],
             drop_pending_updates=True,
             poll_interval=1.0,
-            timeout=30
+            timeout=30,
+            bootstrap_retries=3
         )
-        logger.info("✅ Бот запущен и слушает обновления!")
+        logger.info("✅ Бот успешно запущен и слушает обновления!")
+        
+        # Бесконечное ожидание
+        while True:
+            await asyncio.sleep(60)
+            
     except Exception as e:
-        logger.error(f"⚠️ Ошибка запуска polling: {e}")
-        logger.info("🔄 Пробуем еще раз через 5 секунд...")
-        await asyncio.sleep(5)
-        try:
-            await application.updater.start_polling(
-                allowed_updates=["message", "channel_post"],
-                drop_pending_updates=True,
-                poll_interval=1.0,
-                timeout=30
-            )
-            logger.info("✅ Бот запущен со второй попытки!")
-        except Exception as e2:
-            logger.error(f"❌ Не удалось запустить polling: {e2}")
-            return
-    
-    # Основной цикл проверки новых постов (уже не нужен, но оставим для обратной совместимости)
-    logger.info("⚡ Бот ожидает новые посты в реальном времени...")
-    
-    # Бесконечное ожидание, чтобы бот не завершился
-    while True:
-        try:
-            await asyncio.sleep(60)
-            # Периодически проверяем, не упал ли polling
-            if not application.updater.running:
-                logger.warning("⚠️ Updater остановлен, перезапускаем...")
-                await application.updater.start_polling(
-                    allowed_updates=["message", "channel_post"],
-                    drop_pending_updates=True,
-                    poll_interval=1.0,
-                    timeout=30
-                )
-        except asyncio.CancelledError:
-            logger.info("🔄 Цикл остановлен")
-            break
-        except Exception as e:
-            logger.error(f"❌ Ошибка в цикле: {e}")
-            import traceback
-            traceback.print_exc()
-            await asyncio.sleep(60)
+        logger.error(f"❌ Ошибка при запуске бота: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 if __name__ == "__main__":
     try:
